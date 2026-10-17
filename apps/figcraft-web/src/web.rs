@@ -26,6 +26,7 @@ pub fn start() {
         {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
+        let shell = crate::query::shell(&query());
         let runner = eframe::WebRunner::new();
         // Framed by a host page (`?ho=`): it drives the editor over postMessage.
         let link = crate::bridge::Link::from_page();
@@ -50,6 +51,7 @@ pub fn start() {
                     let ctx = cc.egui_ctx.clone();
                     session.live.install(Box::new(figcraft_collab_net::NetLink::new(std::sync::Arc::new(move || ctx.request_repaint()))));
                     let mut fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
+                    fig.shell = shell;
                     // `#join=<link>`: join that session, as opening an invite link does on the desktop.
                     let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
                     if let Some(link) = crate::query::join_link(&hash) {

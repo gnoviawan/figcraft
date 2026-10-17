@@ -179,6 +179,9 @@ impl Host {
                 Err(e) => return Answer::Now(Err(engine_error(format!("params are not JSON: {e}")))),
             }
         };
+        if app.shell.rejects(method, &p) {
+            return unknown();
+        }
         let result = match route {
             Route::Frame if hidden => {
                 return Answer::Now(Err(HostError {
@@ -217,15 +220,17 @@ impl Host {
             }
             HostMethod::Snapshot => {
                 let content_version = self.content_version(&app.session);
-                let ds = app.session.ds().map_err(|e| engine_error(e.to_string()))?;
-                let bytes = figcraft_engine::cmd::file::file_bytes(ds).map_err(|e| engine_error(e.to_string()))?;
+                let bytes = on_the_document_itself(&mut app.session, |s| {
+                    let ds = s.ds().map_err(|e| engine_error(e.to_string()))?;
+                    figcraft_engine::cmd::file::file_bytes(ds).map_err(|e| engine_error(e.to_string()))
+                })?;
                 Ok(json!({"contentVersion": content_version, "bytes": b64.encode(bytes)}))
             }
             HostMethod::MarkSaved => {
                 let saved = p.get("contentVersion").and_then(Value::as_u64).ok_or_else(|| engine_error("`contentVersion` required"))?;
                 // A snapshot older than the content now must not clear dirty.
                 if saved == self.content_version(&app.session) {
-                    app.session.ds_mut().map_err(|e| engine_error(e.to_string()))?.mark_saved();
+                    on_the_document_itself(&mut app.session, |s| s.ds_mut().map(DocState::mark_saved).map_err(|e| engine_error(e.to_string())))?;
                 }
                 let s = self.state(&app.session);
                 Ok(json!({"dirty": s.dirty, "contentVersion": s.content_version}))
@@ -247,6 +252,22 @@ impl Host {
             HostMethod::Describe => Ok(json!({"tag": option_env!("FIGCRAFT_HOST_TAG").unwrap_or("dev"), "engineVersion": env!("CARGO_PKG_VERSION")})),
         }
     }
+}
+
+/// Runs `f` with the document itself in `ds.doc`, not the version or live text preview shown in
+/// its place (saving encodes and marks saved `ds.doc`). A version preview is shown again after.
+fn on_the_document_itself<R>(session: &mut Session, f: impl FnOnce(&mut Session) -> R) -> R {
+    figcraft_engine::textpreview::end(session);
+    let preview = session.ds_mut().ok().and_then(|ds| {
+        let shown = ds.preview.clone().map(|p| (p, ds.doc.clone()));
+        ds.end_preview();
+        shown
+    });
+    let result = f(session);
+    if let (Some((p, shown)), Ok(ds)) = (preview, session.ds_mut()) {
+        ds.start_preview(&p.id, &p.name, p.time, shown);
+    }
+    result
 }
 
 /// `ids` (default: the current page's top-level layers) exported as `format` at `scale`.

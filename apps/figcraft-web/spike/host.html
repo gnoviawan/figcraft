@@ -24,11 +24,11 @@
     <pre id="log"></pre>
   </aside>
   <script>
-    // ?bundle=<origin of the served figcraft-web build>; extra query flags (webgl) pass through.
+    // ?bundle=<origin of the served figcraft-web build>; webgl and kiosk (embed=kiosk) pass through.
     const query = new URLSearchParams(location.search);
     const bundle = query.get('bundle') || 'http://127.0.0.1:8767';
     const frame = document.getElementById('frame');
-    const flags = query.has('webgl') ? '&webgl' : '';
+    const flags = (query.has('webgl') ? '&webgl' : '') + (query.has('kiosk') ? '&embed=kiosk' : '');
     frame.src = `${bundle}/?ho=${encodeURIComponent(location.origin)}&ms=1${flags}`;
 
     const pending = new Map();

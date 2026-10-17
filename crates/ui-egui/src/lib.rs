@@ -32,6 +32,7 @@ pub mod home;
 pub mod home_recents;
 pub mod i18n;
 pub mod icons;
+pub mod kiosk;
 pub mod import_report;
 pub mod layers;
 pub mod layout_panel;
@@ -118,6 +119,8 @@ mod home_tests;
 mod idle_tests;
 #[cfg(test)]
 mod import_report_tests;
+#[cfg(test)]
+mod kiosk_tests;
 #[cfg(test)]
 mod layers_behaviour_tests;
 #[cfg(test)]
@@ -223,6 +226,7 @@ use figcraft_engine::Session;
 use serde_json::{Value, json};
 
 pub use control::{ControlReply, ControlRequest};
+pub use kiosk::Shell;
 
 /// Platform services the app crate provides (file dialogs, clipboard, URLs).
 pub trait Services {
@@ -709,6 +713,8 @@ pub struct FigApp {
     /// The automation roots the app was started with: every frame and control request runs
     /// confined to them ([`windows::guard`]).
     pub automation_roots: Option<Arc<figcraft_engine::file_access::Roots>>,
+    /// How much of the editor's own shell shows (a host page embedding it takes the rest over).
+    pub shell: Shell,
 }
 
 /// What to do with the result of a command run in the background.
@@ -740,6 +746,7 @@ impl FigApp {
             pending_dialog: None,
             ui_context: None,
             automation_roots: None,
+            shell: Shell::Full,
         }
     }
 
@@ -865,6 +872,9 @@ impl FigApp {
     pub fn handle_ui_requests(&mut self) {
         let reqs = std::mem::take(&mut self.session.ui_requests);
         for r in reqs {
+            if self.shell.drops_request(&r.kind) {
+                continue;
+            }
             match r.kind.as_str() {
                 "dialog.about" => {
                     self.ui.about = true;
@@ -1059,6 +1069,9 @@ impl FigApp {
     }
 
     pub fn save(&mut self) {
+        if self.shell.is_kiosk() {
+            return;
+        }
         // A branch tab saves its main file.
         let tab = figcraft_engine::branches::file_tab(&self.session);
         // A path ending in .fig is never saved over silently: a .fig destination is an export copy.
@@ -1122,7 +1135,7 @@ impl FigApp {
 
     /// Open a native dialog from the window drawing now, for the file in front (`pin`).
     fn start_dialog(&mut self, start: impl FnOnce(&mut dyn Services) -> DialogFuture, pin: bool, done: impl FnOnce(&mut FigApp, PathBuf) + 'static) {
-        if self.pending_dialog.is_some() {
+        if self.pending_dialog.is_some() || self.shell.is_kiosk() {
             return;
         }
         let doc = if pin { self.session.ds().ok().filter(|d| self.shows(d.uid)).map(|d| d.uid) } else { None };
@@ -1260,6 +1273,9 @@ impl FigApp {
     /// Every [`AUTOSAVE_SECS`], each open document with unsaved changes since its last version
     /// gets an autosave checkpoint in its version history.
     fn autosave_tick(&mut self, ctx: &egui::Context) {
+        if self.shell.is_kiosk() {
+            return;
+        }
         let now = ctx.input(|i| i.time);
         if now < self.ui.next_autosave {
             // Wake up for it even if nothing else draws a frame by then.
@@ -1421,7 +1437,13 @@ impl FigApp {
         // The Inspect tab measures on hover without Alt.
         self.session.tool.redlines = self.ui.right_tab == RightTab::Inspect;
         self.end_pen_outside_design();
-        tabs::tab_bar(self, ui);
+        let kiosk = self.shell.is_kiosk();
+        if kiosk {
+            self.ui.home = false;
+            self.ui.main_menu = false;
+        } else {
+            tabs::tab_bar(self, ui);
+        }
         if self.ui.present.is_some() {
             // A close request can arrive while the presenter fills the window. Let its unsaved
             // changes dialog take Escape and draw above the player just as it does in the editor.
@@ -1429,6 +1451,12 @@ impl FigApp {
             present::show(self, ui);
             dialogs::show(self, &ctx);
             // What went wrong while presenting (a widget's plugin failing) shows over it.
+            self.toast_ui(&ctx);
+            windows::requests(self, &ctx);
+            return;
+        }
+        if kiosk && !self.has_files() {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |_| {});
             self.toast_ui(&ctx);
             windows::requests(self, &ctx);
             return;
