@@ -61,8 +61,8 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
     `{dirty, contentVersion}`.
   - `host.renderPng {ids?, scale?}` and `host.exportBytes {format, ids?, scale?}` return a base64
     string. Without `ids` they export the current page's top-level layers.
-  - `host.theme {tokens}` and `host.locale {bcp47}` are stored and acknowledged. Applying them
-    belongs to a later unit.
+  - `host.theme {tokens}` and `host.locale {bcp47}` restyle and relabel the editor at once. The
+    payloads are in "Theme, locale and brand (E1-3)" below.
   - `host.describe` → `{tag, engineVersion}`. `tag` comes from the build-time `FIGCRAFT_HOST_TAG`
     and defaults to `dev`.
 - **`ui.*`.** These are queued on upstream's control queue, and the next frame's drain answers them.
@@ -86,6 +86,104 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
 Tests: `cargo test -p figcraft-web` has 10 host-API tests, covering ids above 2^53 surviving as
 text, contentVersion semantics, stale `markSaved`, a snapshot round trip, render and export, typed
 errors and ready gating.
+
+## Theme, locale and brand (E1-3)
+
+Patch areas 3 and 4. The host sends both calls after every mount, and again whenever its own theme
+or language changes. The editor keeps them for the life of the mount and applies them on every
+frame. A remount starts with figcraft's own theme and the browser's language until the host sends
+them again.
+
+### `host.theme`
+
+```json
+{"tokens": {
+  "mode": "dark",
+  "background": "#08090a",
+  "card": "#0f1011",
+  "foreground": "#e5e5e6",
+  "mutedForeground": "#8a8f98",
+  "border": "#23252a",
+  "primary": "#3b82f6",
+  "primaryFill": "#3b82f6",
+  "destructive": "#ef4444"
+}}
+```
+
+- Every key is required. Colours are `#rrggbb` strings, which is what Termul's
+  `readCssTokenHex('--<token>')` returns. `mode` is `"light"` or `"dark"`.
+- The keys are Termul's semantic tokens in camelCase: `--background`, `--card`, `--foreground`,
+  `--muted-foreground`, `--border`, `--primary` (accent text), `--primary-fill` (solid accent),
+  `--destructive`.
+- `{"tokens": null}` hands the colours back to the editor's own theme preference.
+- The reply is `{dark}`. A missing key, a bad colour or a bad `mode` is `ENGINE_ERROR`, and the
+  colours already applied stay.
+- The mapping is `Tokens::from_host` in `crates/ui-egui/src/theme.rs`:
+  - `background` paints the canvas and the tab strip.
+  - `card` paints the panels, dialogs and menus.
+  - `foreground` is used for text, icons and the focus ring. `mutedForeground` is used for secondary text.
+  - `primaryFill` is the accent, used for selection and handles. `primary` is used for accent text.
+  - `destructive` is used for danger.
+  - Hover, pressed, field and selected-row shades are mixed from those colours.
+  - Component purple, success, warning, guides and shadows come from figcraft's own light or dark
+    theme, picked by `mode`.
+- The colours apply in the call itself, without a reload or a frame. While they are set, figcraft's
+  own light/dark switches are hidden: the tab-bar toggle and the Preferences Theme row. The check
+  is `FigApp::theme_toggle_shown()`. The kiosk branch can add `&& !kiosk` there.
+
+### `host.locale`
+
+- The request is `{"bcp47": "de-DE"}` and the reply is `{"language": "de"}`. The reply names the
+  catalog the tag resolved to.
+- The tag resolves the same way the language preference does: the exact tag, else its base
+  language, else a regional catalog. A tag with no catalog shows English.
+- The call sets the `pref.language` preference and switches the catalog at once.
+- A missing or malformed tag is `ENGINE_ERROR`.
+
+### Brand
+
+- The build-time env is `FIGCRAFT_BRAND_NAME`. Leave it unset for upstream's "FigCraft".
+- Termul builds the bundle with `FIGCRAFT_BRAND_NAME="Termul Canvas" trunk build --release`.
+- `crates/ui-egui/build.rs` replaces "FigCraft" in every catalog's text when it bakes the catalogs.
+  The keys, which are the English text in the code, stay as they are.
+  `crates/ui-egui/src/brand.rs` holds the name for the strings outside the catalogs: the About
+  title, the home sidebar, window titles, the engine's command labels and the web loading text.
+- A rebranded About shows the name and version, then only the plain text "Based on FigCraft by the
+  ArtCraft team.". It has no ArtCraft name, link, Discord link or logo tile.
+- Left as is:
+  - The `.figcraft` file extension.
+  - Engine and format error messages, such as "not a valid FigCraft file".
+  - The Help menu's link to getartcraft.com. The kiosk build hides that menu.
+  - The static `index.html`, which says "Loading FigCraft…" until the wasm starts.
+  - FigCraft's own chameleon-tail glyph (`Icon::Logo`, original MIT artwork, not an ArtCraft mark)
+    on the rail's main-menu button and the document tabs. The kiosk build hides both.
+
+### Verified
+
+`spike/brand-theme.mjs` drives a bundle built with `FIGCRAFT_BRAND_NAME="Termul Canvas"` and saves
+four screenshots: `brand-dark.png`, `brand-light.png`, `brand-about.png` and `brand-about-de.png`.
+Termul dark and then Termul light are applied to the same mount, with no reload. About shows only
+the name, the version and the attribution. After `host.locale {bcp47: "de-DE"}` the UI is German
+and About reads "Über Termul Canvas".
+
+Not themed by the tokens:
+
+- The canvas page colour, which is document data.
+- Canvas overlays and the Share button, which use the `ACCENT` constant rather than `Tokens`.
+
+In the built wasm, every "ArtCraft" is in one of these places:
+
+- The two About strings a rebranded build does not show, in each language.
+- The attribution.
+
+Every "FigCraft" is in one of these places:
+
+- Catalog keys, each followed by its renamed value.
+- Engine, format and plugin error messages.
+- The `brand::UPSTREAM` constant.
+
+The test `brand::tests::a_rebranded_build_shows_no_upstream_name_or_artcraft_mark` checks every
+catalog value in every language.
 
 ## Measurements
 
