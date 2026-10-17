@@ -136,6 +136,8 @@ fn changes_are_reported_once_and_only_after_ready() {
     rect(&mut host, &mut app, &ctx);
     let change = host.changed(&app.session).unwrap();
     assert!(change.dirty);
+    let sent: Value = serde_json::from_str(&change.to_json()).unwrap();
+    assert_eq!(sent, json!({"dirty": true, "contentVersion": change.content_version}), "the event payload names its fields as the page reads them");
     assert_eq!(host.changed(&app.session), None, "reported once");
 }
 
@@ -322,4 +324,22 @@ fn locale_switches_the_catalog_and_frames_keep_it() {
         let err = now(host.call(&mut app, &ctx, "host.locale", &bad.to_string(), false)).unwrap_err();
         assert_eq!(err.code, Code::EngineError, "{bad}");
     }
+}
+
+#[test]
+fn error_codes_reach_the_page_under_their_documented_names() {
+    let names: Vec<&str> = [Code::CanvasHidden, Code::UnknownMethod, Code::EngineError].into_iter().map(Code::as_str).collect();
+    assert_eq!(names, ["CANVAS_HIDDEN", "UNKNOWN_METHOD", "ENGINE_ERROR"]);
+}
+
+#[test]
+fn a_ui_method_is_answered_on_its_receiver_once_frames_run() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = app();
+    let Answer::Later(reply) = host.call(&mut app, &ctx, "ui.inspect", "{}", false) else { panic!("expected the answer later") };
+    assert!(reply.try_recv().is_err(), "nothing before a frame has run");
+    frame(&ctx, &mut app);
+    frame(&ctx, &mut app);
+    let answered = reply.try_recv().expect("the frame answered");
+    assert!(answered.result.is_ok(), "{:?}", answered.result);
 }
