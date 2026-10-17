@@ -1283,9 +1283,10 @@ impl FigApp {
         theme::apply_with(ctx, tokens, self.reduce_motion());
     }
 
-    /// Whether the light/dark theme switches show: not while the embedding host sets the colours.
+    /// Whether the light/dark theme switches show: not while the embedding host sets the colours,
+    /// and not in a kiosk, where the host owns the theme.
     pub fn theme_toggle_shown(&self) -> bool {
-        self.ui.host_theme.is_none()
+        self.ui.host_theme.is_none() && !self.shell.is_kiosk()
     }
 
     /// Every [`AUTOSAVE_SECS`], each open document with unsaved changes since its last version

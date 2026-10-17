@@ -107,3 +107,15 @@ fn host_colours_replace_the_preference_live_and_clearing_them_restores_it() {
     assert_eq!(Tokens::get(&ctx), Tokens::light());
     assert!(app.theme_toggle_shown());
 }
+
+#[test]
+fn a_kiosk_hides_the_theme_switches_even_before_the_host_sets_colours() {
+    let mut app = FigApp::new(Session::empty(), Box::new(NoServices));
+    assert!(app.theme_toggle_shown());
+    app.shell = crate::Shell::Kiosk;
+    assert!(!app.theme_toggle_shown());
+    app.ui.host_theme = Some(Tokens::from_host(&termul_dark()));
+    assert!(!app.theme_toggle_shown());
+    app.shell = crate::Shell::Full;
+    assert!(!app.theme_toggle_shown(), "host colours alone still hide them");
+}
