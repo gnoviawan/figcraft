@@ -9,7 +9,8 @@
 //! A missing or malformed file gives empty tables (or no names) and a warning.
 //!
 //! Also bakes the UI string catalogs (`locales/<code>.toml`, see docs/translating.md) into sorted
-//! static tables for `i18n`.
+//! static tables for `i18n`, with "FigCraft" in their text replaced by `FIGCRAFT_BRAND_NAME` when
+//! that is set at build time (`src/brand.rs`).
 
 use std::fmt::Write as _;
 
@@ -37,6 +38,8 @@ fn main() {
 fn locales() -> String {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("locales");
     println!("cargo::rerun-if-changed={}", dir.display());
+    println!("cargo::rerun-if-env-changed=FIGCRAFT_BRAND_NAME");
+    let brand = std::env::var("FIGCRAFT_BRAND_NAME").ok().filter(|b| !b.is_empty());
     let mut files: Vec<_> =
         std::fs::read_dir(&dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "toml")).collect();
     // By code, so "es" comes before "es-419".
@@ -44,7 +47,10 @@ fn locales() -> String {
     let langs: Vec<_> = files
         .into_iter()
         .filter_map(|path| {
-            let t = read(&path, "the language is left out", |t| t.parse::<toml::Table>().map_err(|e| e.to_string()))?;
+            let mut t = read(&path, "the language is left out", |t| t.parse::<toml::Table>().map_err(|e| e.to_string()))?;
+            if let Some(brand) = &brand {
+                t.iter_mut().for_each(|(_, v)| rename(v, brand));
+            }
             Some((path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(), path, t))
         })
         .collect();
@@ -69,6 +75,16 @@ fn locales() -> String {
 ",
     );
     o
+}
+
+/// "FigCraft" in every string value under `v` becomes `brand`; keys (the English in the code) stay.
+fn rename(v: &mut toml::Value, brand: &str) {
+    match v {
+        toml::Value::String(s) => *s = s.replace("FigCraft", brand),
+        toml::Value::Table(t) => t.iter_mut().for_each(|(_, v)| rename(v, brand)),
+        toml::Value::Array(a) => a.iter_mut().for_each(|v| rename(v, brand)),
+        _ => {}
+    }
 }
 
 /// The rows of one catalog table: strings or plural forms (`other` required).

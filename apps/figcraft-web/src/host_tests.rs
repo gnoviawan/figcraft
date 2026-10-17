@@ -140,12 +140,8 @@ fn changes_are_reported_once_and_only_after_ready() {
 }
 
 #[test]
-fn theme_locale_and_describe_answer() {
+fn describe_answers_the_tag_and_engine_version() {
     let (mut app, ctx, mut host) = app();
-    ok(&mut host, &mut app, &ctx, "host.theme", json!({"tokens": {"bg": "#000"}}));
-    ok(&mut host, &mut app, &ctx, "host.locale", json!({"bcp47": "id-ID"}));
-    assert_eq!(host.theme, Some(json!({"bg": "#000"})));
-    assert_eq!(host.locale.as_deref(), Some("id-ID"));
     let d = ok(&mut host, &mut app, &ctx, "host.describe", json!({}));
     assert_eq!(d["tag"], json!(option_env!("FIGCRAFT_HOST_TAG").unwrap_or("dev")));
     assert_eq!(d["engineVersion"], json!(env!("CARGO_PKG_VERSION")));
@@ -232,4 +228,98 @@ fn marking_saved_during_a_version_preview_marks_the_real_document() {
     assert_eq!(saved["dirty"], json!(false));
     assert!(app.session.ds_mut().unwrap().end_preview());
     assert!(!host.state(&app.session).dirty, "still clean once the preview is over");
+}
+
+fn termul_dark() -> Value {
+    json!({"mode": "dark", "background": "#08090a", "card": "#0f1011", "foreground": "#e5e5e6", "mutedForeground": "#8a8f98",
+        "border": "#23252a", "primary": "#5b9bff", "primaryFill": "#3b82f6", "destructive": "#f0605d"})
+}
+
+fn termul_light() -> Value {
+    json!({"mode": "light", "background": "#ffffff", "card": "#ffffff", "foreground": "#0d0d0d", "mutedForeground": "#6b6b6b",
+        "border": "#e6e6e6", "primary": "#2563eb", "primaryFill": "#3B82F6", "destructive": "#c0262d"})
+}
+
+/// The UI language is one per process: tests that draw frames or switch it take turns.
+static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn frame(ctx: &egui::Context, app: &mut FigApp) {
+    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui));
+    output.textures_delta.clear();
+}
+
+#[test]
+fn theme_tokens_restyle_the_editor_at_once_and_null_hands_back_the_preference() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    use egui::Color32;
+    use figcraft_ui_egui::theme::Tokens;
+    let (mut app, ctx, mut host) = app();
+    frame(&ctx, &mut app);
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.theme", json!({"tokens": termul_dark()})), json!({"dark": true}));
+    let t = Tokens::get(&ctx);
+    assert_eq!(
+        (t.canvas, t.panel, t.text, t.accent),
+        (Color32::from_rgb(8, 9, 10), Color32::from_rgb(15, 16, 17), Color32::from_rgb(0xe5, 0xe5, 0xe6), Color32::from_rgb(0x3b, 0x82, 0xf6))
+    );
+    assert!(ctx.global_style().visuals.dark_mode);
+    frame(&ctx, &mut app);
+    assert_eq!(Tokens::get(&ctx), t, "the next frame keeps the host's colours");
+
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.theme", json!({"tokens": termul_light()})), json!({"dark": false}));
+    assert_eq!(Tokens::get(&ctx).panel, Color32::WHITE);
+    assert!(!ctx.global_style().visuals.dark_mode);
+    assert!(!app.theme_toggle_shown());
+
+    ok(&mut host, &mut app, &ctx, "host.theme", json!({"tokens": null}));
+    assert_eq!(app.ui.host_theme, None);
+    assert!(app.theme_toggle_shown());
+}
+
+#[test]
+fn malformed_theme_tokens_are_engine_errors_and_keep_the_colours() {
+    let (mut app, ctx, mut host) = app();
+    ok(&mut host, &mut app, &ctx, "host.theme", json!({"tokens": termul_dark()}));
+    let before = app.ui.host_theme;
+    let with = |key: &str, v: Value| {
+        let mut t = termul_dark();
+        t[key] = v;
+        json!({"tokens": t})
+    };
+    let mut no_border = termul_dark();
+    no_border.as_object_mut().unwrap().remove("border");
+    let bad = [
+        json!({}),
+        json!({"tokens": no_border}),
+        with("mode", json!("dim")),
+        with("card", json!("#fff")),
+        with("card", json!("#gg0000")),
+        with("card", json!("#+fffff")),
+        with("card", json!("red")),
+        with("card", json!(0x0f1011)),
+        with("card", json!("#0f1011ff")),
+    ];
+    for params in bad {
+        let err = now(host.call(&mut app, &ctx, "host.theme", &params.to_string(), false)).unwrap_err();
+        assert_eq!(err.code, Code::EngineError, "{params}");
+        assert_eq!(app.ui.host_theme, before, "{params}");
+    }
+}
+
+#[test]
+fn locale_switches_the_catalog_and_frames_keep_it() {
+    use figcraft_ui_egui::i18n::tr;
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = app();
+    frame(&ctx, &mut app);
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.locale", json!({"bcp47": "de-DE"})), json!({"language": "de"}));
+    assert!(tr("About FigCraft").starts_with("Über "), "{}", tr("About FigCraft"));
+    frame(&ctx, &mut app);
+    assert!(tr("About FigCraft").starts_with("Über "), "a frame keeps the host's language");
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.locale", json!({"bcp47": "pt-BR"})), json!({"language": "pt-BR"}));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.locale", json!({"bcp47": "en"})), json!({"language": "en"}));
+    assert!(tr("About FigCraft").starts_with("About "));
+    for bad in [json!({}), json!({"bcp47": "not a tag"}), json!({"bcp47": 7})] {
+        let err = now(host.call(&mut app, &ctx, "host.locale", &bad.to_string(), false)).unwrap_err();
+        assert_eq!(err.code, Code::EngineError, "{bad}");
+    }
 }

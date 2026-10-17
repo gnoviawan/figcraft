@@ -10,6 +10,7 @@ use figcraft_engine::cmd::file::{export_jobs, exportable_layers};
 use serde_json::{Value, json};
 
 use crate::FigApp;
+use crate::brand;
 use crate::export_panel::{export_layers, save_one, suggested_name};
 use crate::i18n::{self, tr, tr_noop, trf, trn};
 use crate::icons::{self, Icon};
@@ -121,15 +122,22 @@ pub(crate) fn tab_strip<T: Copy + PartialEq>(ui: &mut egui::Ui, t: &Tokens, tabs
 /// About ▸ About: the logo, version, blurb and links.
 fn about_body(ui: &mut egui::Ui, t: &Tokens) {
     ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
-        ui.painter().rect_filled(r, CornerRadius::same(10), ACCENT);
-        icons::paint(ui.painter(), r.shrink(10.0), Icon::Logo, Color32::WHITE);
+        if !brand::REBRANDED {
+            let (r, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
+            ui.painter().rect_filled(r, CornerRadius::same(10), ACCENT);
+            icons::paint(ui.painter(), r.shrink(10.0), Icon::Logo, Color32::WHITE);
+        }
         ui.vertical(|ui| {
-            ui.label(RichText::new("FigCraft").font(semibold(18.0)));
+            ui.label(RichText::new(brand::NAME).font(semibold(18.0)));
             ui.label(RichText::new(trf("Version {version}", &[("version", &VERSION)])).color(t.text_secondary));
         });
     });
     ui.add_space(12.0);
+    // A modified version keeps no ArtCraft name, link or mark: plain text only (LICENSE-brand.txt).
+    if brand::REBRANDED {
+        ui.label(RichText::new(brand::ATTRIBUTION).color(t.text_secondary));
+        return;
+    }
     ui.label(tr(
         "Interface design and prototyping. A free, open-source, clean-room design tool written from scratch in Rust, part of the ArtCraft Crafting Apps.",
     ));
@@ -269,15 +277,19 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                     app.run("pref.nudge", json!({"small": small, "big": big}));
                 }
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(tr("Theme"));
-                for (l, c) in [(tr_noop("Light"), "view.themeLight"), (tr_noop("Dark"), "view.themeDark"), (tr_noop("System"), "view.themeSystem")] {
-                    if ui.selectable_label(app.session.prefs.theme.eq_ignore_ascii_case(l), tr(l)).clicked() {
-                        app.run(c, json!({}));
+            if app.theme_toggle_shown() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(tr("Theme"));
+                    for (l, c) in
+                        [(tr_noop("Light"), "view.themeLight"), (tr_noop("Dark"), "view.themeDark"), (tr_noop("System"), "view.themeSystem")]
+                    {
+                        if ui.selectable_label(app.session.prefs.theme.eq_ignore_ascii_case(l), tr(l)).clicked() {
+                            app.run(c, json!({}));
+                        }
                     }
-                }
-            });
+                });
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(tr("Language"));

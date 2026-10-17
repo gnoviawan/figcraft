@@ -1,7 +1,7 @@
 //! The browser shell: web `Services` and the eframe web runner.
 
 use figcraft_engine::Session;
-use figcraft_ui_egui::{FigApp, Services};
+use figcraft_ui_egui::{FigApp, Services, brand};
 use wasm_bindgen::JsCast as _;
 
 const CANVAS_ID: &str = "figcraft_canvas";
@@ -14,6 +14,12 @@ pub fn start() {
             log::error!("no document");
             return;
         };
+        if brand::REBRANDED {
+            document.set_title(brand::NAME);
+            if let Some(el) = document.get_element_by_id(LOADING_ID) {
+                el.set_text_content(Some(&format!("Loading {}…", brand::NAME)));
+            }
+        }
         let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
             log::error!("missing <canvas id=\"{CANVAS_ID}\">");
             return;
@@ -65,7 +71,9 @@ pub fn start() {
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
             match result {
                 Ok(()) => el.remove(),
-                Err(e) => el.set_inner_html(&format!("<p>FigCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
+                Err(e) => {
+                    el.set_inner_html(&format!("<p>{} failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>", brand::NAME))
+                }
             }
         }
     });
