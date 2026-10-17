@@ -277,15 +277,19 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                     app.run("pref.nudge", json!({"small": small, "big": big}));
                 }
             });
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.label(tr("Theme"));
-                for (l, c) in [(tr_noop("Light"), "view.themeLight"), (tr_noop("Dark"), "view.themeDark"), (tr_noop("System"), "view.themeSystem")] {
-                    if ui.selectable_label(app.session.prefs.theme.eq_ignore_ascii_case(l), tr(l)).clicked() {
-                        app.run(c, json!({}));
+            if app.theme_toggle_shown() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(tr("Theme"));
+                    for (l, c) in
+                        [(tr_noop("Light"), "view.themeLight"), (tr_noop("Dark"), "view.themeDark"), (tr_noop("System"), "view.themeSystem")]
+                    {
+                        if ui.selectable_label(app.session.prefs.theme.eq_ignore_ascii_case(l), tr(l)).clicked() {
+                            app.run(c, json!({}));
+                        }
                     }
-                }
-            });
+                });
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.label(tr("Language"));

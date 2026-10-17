@@ -44,6 +44,31 @@ pub struct Tokens {
     pub focus: Color32,
 }
 
+/// The colour roles an embedding host themes the editor with (`host.theme`), named after the
+/// host's semantic tokens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HostPalette {
+    pub dark: bool,
+    /// The page: the canvas and the strip behind tabs.
+    pub background: Color32,
+    /// Raised panels, dialogs and menus.
+    pub card: Color32,
+    pub foreground: Color32,
+    pub muted_foreground: Color32,
+    pub border: Color32,
+    /// Accent text on panels.
+    pub primary: Color32,
+    /// Solid accent fills: selection, the primary button, handles.
+    pub primary_fill: Color32,
+    pub destructive: Color32,
+}
+
+/// `a` moved `t` of the way to `b`, opaque.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let ch = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
+}
+
 pub const ACCENT: Color32 = Color32::from_rgb(0x0D, 0x99, 0xFF);
 pub const COMPONENT: Color32 = Color32::from_rgb(0x97, 0x47, 0xFF);
 /// Handoff status badges (white text on these, in both themes).
@@ -129,6 +154,46 @@ impl Tokens {
             menu_hover: ACCENT,
             menu_dim: Color32::from_rgb(0x9A, 0x9A, 0x9A),
             focus: ACCENT,
+        }
+    }
+
+    /// The tokens for an embedding host's palette: its roles as given, the shades between them
+    /// mixed from them, and what it has no role for (components, success, guides, shadows) from
+    /// the light or dark theme it names.
+    pub fn from_host(p: &HostPalette) -> Self {
+        let base = if p.dark { Self::dark() } else { Self::light() };
+        let ink = |t: f32| mix(p.card, p.foreground, t);
+        let hover = ink(0.06);
+        Self {
+            dark: p.dark,
+            bg: p.card,
+            panel: p.card,
+            canvas: p.background,
+            border: p.border,
+            border_strong: mix(p.border, p.foreground, 0.15),
+            text: p.foreground,
+            text_secondary: p.muted_foreground,
+            text_tertiary: mix(p.card, p.muted_foreground, 0.6),
+            icon: p.foreground,
+            icon_secondary: p.muted_foreground,
+            hover,
+            pressed: ink(0.12),
+            field: ink(0.04),
+            field_hover_border: p.border,
+            accent: p.primary_fill,
+            accent_hover: mix(p.primary_fill, p.foreground, 0.15),
+            accent_text: p.primary,
+            selected_row: mix(p.card, p.primary_fill, 0.2),
+            selected_row_child: mix(p.card, p.primary_fill, 0.1),
+            danger: p.destructive,
+            tab_bar: p.background,
+            tab_active: p.card,
+            menu: p.card,
+            menu_text: p.foreground,
+            menu_hover: hover,
+            menu_dim: p.muted_foreground,
+            focus: p.foreground,
+            ..base
         }
     }
 
@@ -331,3 +396,7 @@ pub fn doc_c32(ctx: &Context, c: figcraft_color::Color) -> Color32 {
     let conv = ctx.data(|d| d.get_temp::<figcraft_color::ProfileConversion>(screen_conversion_id()));
     c32(conv.map_or(c, |k| k.apply(c)))
 }
+
+#[cfg(test)]
+#[path = "theme_host_tests.rs"]
+mod host_tests;

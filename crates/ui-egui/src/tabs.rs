@@ -185,15 +185,17 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
             app.ui.home = false;
         }
         // Right side: theme toggle (left of the window buttons).
-        let theme_r = Rect::from_center_size(pos2(rect.max.x - buttons_w - 24.0, rect.center().y), vec2(28.0, 28.0));
-        let tresp = ui.interact(theme_r, ui.id().with("theme"), Sense::click()).tip(tr("Toggle light/dark theme"));
-        if tresp.hovered() {
-            ui.painter().rect_filled(theme_r, CornerRadius::same(5), t.hover);
-        }
-        icons::paint(ui.painter(), theme_r.shrink(7.0), if app.ui.dark { Icon::Sun } else { Icon::Moon }, t.icon);
-        if tresp.clicked() {
-            let cmd = if app.ui.dark { "view.themeLight" } else { "view.themeDark" };
-            app.run(cmd, json!({}));
+        if app.theme_toggle_shown() {
+            let theme_r = Rect::from_center_size(pos2(rect.max.x - buttons_w - 24.0, rect.center().y), vec2(28.0, 28.0));
+            let tresp = ui.interact(theme_r, ui.id().with("theme"), Sense::click()).tip(tr("Toggle light/dark theme"));
+            if tresp.hovered() {
+                ui.painter().rect_filled(theme_r, CornerRadius::same(5), t.hover);
+            }
+            icons::paint(ui.painter(), theme_r.shrink(7.0), if app.ui.dark { Icon::Sun } else { Icon::Moon }, t.icon);
+            if tresp.clicked() {
+                let cmd = if app.ui.dark { "view.themeLight" } else { "view.themeDark" };
+                app.run(cmd, json!({}));
+            }
         }
         if let Some(i) = switch {
             if let Some(p) = app.ui.present.take() {

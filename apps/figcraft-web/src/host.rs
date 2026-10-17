@@ -9,7 +9,8 @@ use std::sync::mpsc::Receiver;
 use base64::Engine as _;
 use figcraft_doc::{Document, ExportFormat, NodeId};
 use figcraft_engine::{DocState, Session};
-use figcraft_ui_egui::{ControlReply, ControlRequest, FigApp};
+use figcraft_ui_egui::theme::{HostPalette, Tokens};
+use figcraft_ui_egui::{ControlReply, ControlRequest, FigApp, i18n};
 use serde_json::{Value, json};
 
 /// The typed error codes a host sees.
@@ -123,8 +124,6 @@ pub struct Host {
     content_version: u64,
     /// The state last reported; `None` until the editor is ready (no dirty before ready).
     reported: Option<DirtyState>,
-    pub theme: Option<Value>,
-    pub locale: Option<String>,
 }
 
 impl Host {
@@ -194,14 +193,14 @@ impl Host {
                 return Answer::Later(rx);
             }
             Route::Engine => figcraft_ui_egui::control::handle(app, ctx, method, &p).map_err(engine_error),
-            Route::Host(m) => self.host(app, m, &p),
+            Route::Host(m) => self.host(app, ctx, m, &p),
             Route::Unknown => return unknown(),
         };
         ctx.request_repaint();
         Answer::Now(result.and_then(|v| serde_json::to_string(&v).map_err(|e| engine_error(e.to_string()))))
     }
 
-    fn host(&mut self, app: &mut FigApp, m: HostMethod, p: &Value) -> Result<Value, HostError> {
+    fn host(&mut self, app: &mut FigApp, ctx: &egui::Context, m: HostMethod, p: &Value) -> Result<Value, HostError> {
         let b64 = base64::engine::general_purpose::STANDARD;
         match m {
             HostMethod::OpenDocument => {
@@ -237,16 +236,55 @@ impl Host {
                 export(&app.session, format, p).map(|bytes| json!(b64.encode(bytes)))
             }
             HostMethod::Theme => {
-                self.theme = Some(p.get("tokens").cloned().unwrap_or(Value::Null));
-                Ok(json!({"ok": true}))
+                let tokens = palette(p.get("tokens").ok_or_else(|| engine_error("`tokens` required (null clears them)"))?)?;
+                app.ui.host_theme = tokens.as_ref().map(Tokens::from_host);
+                app.apply_theme(ctx);
+                Ok(json!({"dark": app.ui.dark}))
             }
             HostMethod::Locale => {
-                self.locale = p.get("bcp47").and_then(Value::as_str).map(str::to_string);
-                Ok(json!({"ok": true}))
+                let tag = p.get("bcp47").and_then(Value::as_str).ok_or_else(|| engine_error("`bcp47` required"))?;
+                app.session.execute("pref.language", &json!({"language": tag})).map_err(|e| engine_error(e.to_string()))?;
+                // At once, not at the next frame: a hidden mount draws none.
+                i18n::set(&app.session.prefs.language, app.services.system_language().as_deref());
+                Ok(json!({"language": i18n::current().map_or("en", |l| l.code)}))
             }
             HostMethod::Describe => Ok(json!({"tag": option_env!("FIGCRAFT_HOST_TAG").unwrap_or("dev"), "engineVersion": env!("CARGO_PKG_VERSION")})),
         }
     }
+}
+
+/// The host's colour roles in `host.theme`'s `tokens`, each `#rrggbb`, with `mode` `light` or
+/// `dark`. `null` hands the colours back to the editor's theme preference.
+fn palette(tokens: &Value) -> Result<Option<HostPalette>, HostError> {
+    if tokens.is_null() {
+        return Ok(None);
+    }
+    let dark = match tokens.get("mode").and_then(Value::as_str) {
+        Some("dark") => true,
+        Some("light") => false,
+        _ => return Err(engine_error("`tokens.mode` must be \"light\" or \"dark\"")),
+    };
+    let color = |key: &str| {
+        let text = tokens.get(key).and_then(Value::as_str).ok_or_else(|| engine_error(format!("`tokens.{key}` (#rrggbb) required")))?;
+        hex(text).ok_or_else(|| engine_error(format!("`tokens.{key}` is not #rrggbb: `{text}`")))
+    };
+    Ok(Some(HostPalette {
+        dark,
+        background: color("background")?,
+        card: color("card")?,
+        foreground: color("foreground")?,
+        muted_foreground: color("mutedForeground")?,
+        border: color("border")?,
+        primary: color("primary")?,
+        primary_fill: color("primaryFill")?,
+        destructive: color("destructive")?,
+    }))
+}
+
+fn hex(text: &str) -> Option<egui::Color32> {
+    let digits = text.strip_prefix('#').filter(|d| d.len() == 6 && d.bytes().all(|b| b.is_ascii_hexdigit()))?;
+    let byte = |i: usize| digits.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok());
+    Some(egui::Color32::from_rgb(byte(0)?, byte(2)?, byte(4)?))
 }
 
 /// `ids` (default: the current page's top-level layers) exported as `format` at `scale`.

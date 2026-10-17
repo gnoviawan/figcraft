@@ -494,6 +494,8 @@ pub struct UiState {
     pub layers_focus: bool,
     pub layers_seen_sel: Vec<NodeId>,
     pub dark: bool,
+    /// Colours an embedding host set (`host.theme`): while set, they replace the theme preference.
+    pub host_theme: Option<theme::Tokens>,
     pub follow_system: bool,
     pub tool_flyout: Option<&'static str>,
     pub last_error: Option<String>,
@@ -624,6 +626,7 @@ impl Default for UiState {
             layers_focus: false,
             layers_seen_sel: Vec::new(),
             dark: false,
+            host_theme: None,
             follow_system: false,
             tool_flyout: None,
             last_error: None,
@@ -1242,20 +1245,34 @@ impl FigApp {
                 theme::install_fonts(ctx, true, cjk);
             }
         }
-        let dark = match self.session.prefs.theme.as_str() {
-            "dark" => true,
-            // The active visuals were set by us last frame (possibly for a manual theme).
-            // Read the integration's OS theme instead; without one, keep the light fallback.
-            "system" => ctx.system_theme() == Some(egui::Theme::Dark),
-            _ => false,
-        };
-        self.ui.dark = dark;
-        // New files take the theme's page colour (existing pages keep theirs).
-        self.session.set_ui_dark(dark);
-        theme::apply_with(ctx, if dark { theme::Tokens::dark() } else { theme::Tokens::light() }, self.reduce_motion());
+        self.apply_theme(ctx);
         if self.worker.is_none() {
             self.worker = Some(render_worker::Worker::new(ctx.clone()));
         }
+    }
+
+    /// Install the embedding host's colours ([`UiState::host_theme`]) when set, else the theme
+    /// preference's.
+    pub fn apply_theme(&mut self, ctx: &egui::Context) {
+        let tokens = self.ui.host_theme.unwrap_or_else(|| {
+            let dark = match self.session.prefs.theme.as_str() {
+                "dark" => true,
+                // The active visuals were set by us last frame (possibly for a manual theme).
+                // Read the integration's OS theme instead; without one, keep the light fallback.
+                "system" => ctx.system_theme() == Some(egui::Theme::Dark),
+                _ => false,
+            };
+            if dark { theme::Tokens::dark() } else { theme::Tokens::light() }
+        });
+        self.ui.dark = tokens.dark;
+        // New files take the theme's page colour (existing pages keep theirs).
+        self.session.set_ui_dark(tokens.dark);
+        theme::apply_with(ctx, tokens, self.reduce_motion());
+    }
+
+    /// Whether the light/dark theme switches show: not while the embedding host sets the colours.
+    pub fn theme_toggle_shown(&self) -> bool {
+        self.ui.host_theme.is_none()
     }
 
     /// Every [`AUTOSAVE_SECS`], each open document with unsaved changes since its last version
