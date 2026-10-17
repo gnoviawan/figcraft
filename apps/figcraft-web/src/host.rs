@@ -163,7 +163,8 @@ impl Host {
         })
     }
 
-    /// Answer `method` with `params` (JSON text). `hidden`: the page is hidden (no frames).
+    /// Answer `method` with `params` (JSON text). `hidden`: no frames are drawn now (the page is
+    /// hidden or the canvas is off screen).
     pub fn call(&mut self, app: &mut FigApp, ctx: &egui::Context, method: &str, params: &str, hidden: bool) -> Answer {
         let unknown = || Answer::Now(Err(HostError { code: Code::UnknownMethod, message: format!("unknown method `{method}`") }));
         let route = route(method);
@@ -180,7 +181,10 @@ impl Host {
         };
         let result = match route {
             Route::Frame if hidden => {
-                return Answer::Now(Err(HostError { code: Code::CanvasHidden, message: format!("`{method}` needs a frame and the page is hidden") }));
+                return Answer::Now(Err(HostError {
+                    code: Code::CanvasHidden,
+                    message: format!("`{method}` needs a frame and the canvas is hidden"),
+                }));
             }
             Route::Frame => {
                 let (reply, rx) = std::sync::mpsc::channel();

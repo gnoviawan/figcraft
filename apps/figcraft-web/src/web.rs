@@ -31,7 +31,7 @@ pub fn start() {
         let link = crate::bridge::Link::from_page();
         if let Some(link) = &link {
             crate::bridge::report_panics();
-            if let Err(e) = crate::bridge::listen(runner.clone(), link.clone()) {
+            if let Err(e) = crate::bridge::listen(runner.clone(), link.clone(), &canvas) {
                 log::error!("host bridge: couldn't listen for messages: {e:?}");
             }
         }

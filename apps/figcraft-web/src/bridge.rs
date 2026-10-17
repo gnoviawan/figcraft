@@ -7,6 +7,8 @@
 //! mountSeq}`: `event.ready` after the first frame with content, `event.dirtyChanged {dirty,
 //! contentVersion}` and `event.crashed {reason}`.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use figcraft_ui_egui::{ControlReply, FigApp};
@@ -22,6 +24,9 @@ pub struct Link {
     parent: web_sys::Window,
     origin: String,
     mount_seq: JsValue,
+    /// Whether the canvas intersects the viewport. Chromium draws no frames for a cross-origin
+    /// iframe outside the viewport or under `display:none`, while `document.hidden` stays false.
+    on_screen: Rc<Cell<bool>>,
 }
 
 impl Link {
@@ -34,7 +39,7 @@ impl Link {
         let origin = query.get("ho").filter(|o| !o.is_empty() && o != "*" && o != "null")?;
         let parent = window.parent().ok().flatten().filter(|p| !Object::is(p, &window))?;
         let mount_seq = query.get("ms").and_then(|s| s.parse::<f64>().ok()).map_or(JsValue::NULL, JsValue::from_f64);
-        Some(Self { parent, origin, mount_seq })
+        Some(Self { parent, origin, mount_seq, on_screen: Rc::new(Cell::new(true)) })
     }
 
     fn post(&self, msg: &Object) {
@@ -110,7 +115,8 @@ impl Embed {
         let (id, mount_seq) = (get(data, "id"), get(data, "mountSeq"));
         let method = get(data, "method").as_string().unwrap_or_default();
         let params = get(data, "params").as_string().unwrap_or_default();
-        match self.host.call(fig, ctx, &method, &params, page_hidden()) {
+        let no_frames = page_hidden() || !self.link.on_screen.get();
+        match self.host.call(fig, ctx, &method, &params, no_frames) {
             Answer::Now(result) => self.link.reply(&id, &mount_seq, result),
             Answer::Later(reply) => self.pending.push(Pending { id, mount_seq, reply }),
         }
@@ -149,9 +155,18 @@ impl Embed {
     }
 }
 
-/// Answer the framing page's messages synchronously against the running app.
-pub fn listen(runner: eframe::WebRunner, link: Link) -> Result<(), JsValue> {
+/// Answer the framing page's messages synchronously against the running app, and follow whether
+/// `canvas` is on screen.
+pub fn listen(runner: eframe::WebRunner, link: Link, canvas: &web_sys::HtmlCanvasElement) -> Result<(), JsValue> {
     let window = web_sys::window().ok_or("no window")?;
+    let on_screen = link.on_screen.clone();
+    let on_intersect = Closure::<dyn FnMut(js_sys::Array)>::new(move |entries: js_sys::Array| {
+        if let Some(e) = entries.iter().last().and_then(|e| e.dyn_into::<web_sys::IntersectionObserverEntry>().ok()) {
+            on_screen.set(e.is_intersecting());
+        }
+    });
+    web_sys::IntersectionObserver::new(on_intersect.as_ref().unchecked_ref())?.observe(canvas);
+    on_intersect.forget();
     let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
         if e.origin() != link.origin || !e.source().is_some_and(|s| Object::is(&s, &link.parent)) {
             return;
