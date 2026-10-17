@@ -15,6 +15,10 @@
 //!
 //! URL query flag: `?webgl` forces the WebGL2 backend instead of WebGPU.
 //!
+//! URL query `?embed=kiosk`: for a page that owns the shell. The editor hides its tab bar, home
+//! screen and menus, answers `UNKNOWN_METHOD` to the host calls that would bring them back or quit,
+//! and neither downloads, asks to save nor takes autosave checkpoints (`crates/ui-egui/src/kiosk.rs`).
+//!
 //! URL query `?ho=<origin>[&ms=<mount seq>]`: a page framing the editor drives it over
 //! `postMessage` (the host API: `host.rs`, `bridge.rs`).
 //!

@@ -150,3 +150,86 @@ fn theme_locale_and_describe_answer() {
     assert_eq!(d["tag"], json!(option_env!("FIGCRAFT_HOST_TAG").unwrap_or("dev")));
     assert_eq!(d["engineVersion"], json!(env!("CARGO_PKG_VERSION")));
 }
+
+fn kiosk_app() -> (FigApp, egui::Context, Host) {
+    let (mut app, ctx, host) = app();
+    app.shell = figcraft_ui_egui::Shell::Kiosk;
+    (app, ctx, host)
+}
+
+#[test]
+fn kiosk_answers_unknown_method_to_the_calls_that_reopen_the_shell() {
+    let (mut app, ctx, mut host) = kiosk_app();
+    let refused = [
+        ("app.quit", "{}"),
+        ("window.new", "{}"),
+        ("window.focus", r#"{"id":1}"#),
+        ("ui.set", r#"{"home":true}"#),
+        ("ui.set", r#"{"mainMenu":"File"}"#),
+        ("ui.menu.invoke", r#"{"id":"file.open"}"#),
+        ("engine.execute", r#"{"command":"window.new"}"#),
+    ];
+    for (method, params) in refused {
+        for hidden in [false, true] {
+            let err = now(host.call(&mut app, &ctx, method, params, hidden)).unwrap_err();
+            assert_eq!(err.code, Code::UnknownMethod, "{method} {params} hidden={hidden}");
+        }
+    }
+    assert!(app.control_queue.is_empty(), "nothing reached the frame queue");
+    assert!(!app.ui.home);
+}
+
+#[test]
+fn kiosk_still_drives_the_editor() {
+    let (mut app, ctx, mut host) = kiosk_app();
+    rect(&mut host, &mut app, &ctx);
+    assert!(matches!(host.call(&mut app, &ctx, "ui.set", r#"{"rightTab":"inspect"}"#, false), Answer::Later(_)));
+    assert!(matches!(host.call(&mut app, &ctx, "ui.menu.invoke", r#"{"id":"edit.undo"}"#, false), Answer::Later(_)));
+    ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}));
+}
+
+#[test]
+fn outside_kiosk_the_same_calls_go_through() {
+    let (mut app, ctx, mut host) = app();
+    assert!(matches!(host.call(&mut app, &ctx, "ui.set", r#"{"home":true}"#, false), Answer::Later(_)));
+    assert!(matches!(host.call(&mut app, &ctx, "ui.menu.invoke", r#"{"id":"file.open"}"#, false), Answer::Later(_)));
+    let ran = now(host.call(&mut app, &ctx, "engine.execute", r#"{"command":"window.new"}"#, false));
+    assert!(ran.is_ok(), "{ran:?}");
+}
+
+fn rect_count(bytes: &[u8]) -> usize {
+    let loaded = figcraft_format::load_bytes_with_versions(bytes).unwrap();
+    loaded.doc.nodes().filter(|n| n.name.starts_with("Rectangle")).count()
+}
+
+/// One rectangle saved as a version, a second one drawn, then the version shown in place of the document.
+fn previewing_an_older_version() -> (FigApp, egui::Context, Host) {
+    let (mut app, ctx, mut host) = app();
+    rect(&mut host, &mut app, &ctx);
+    ok(&mut host, &mut app, &ctx, "engine.execute", json!({"command": "file.saveVersion", "params": {"name": "one rectangle"}}));
+    rect(&mut host, &mut app, &ctx);
+    ok(&mut host, &mut app, &ctx, "engine.execute", json!({"command": "version.preview", "params": {"index": 0}}));
+    assert!(app.session.ds().unwrap().preview.is_some());
+    (app, ctx, host)
+}
+
+#[test]
+fn a_snapshot_taken_during_a_version_preview_is_the_real_document() {
+    let (mut app, ctx, mut host) = previewing_an_older_version();
+    let before = host.state(&app.session);
+    let snap = ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}));
+    assert_eq!(rect_count(&b64(&snap["bytes"])), 2, "the two rectangles, not the version's one");
+    assert!(app.session.ds().unwrap().preview.is_some(), "the user is still looking at the version");
+    assert_eq!(app.session.doc().unwrap().nodes().filter(|n| n.name.starts_with("Rectangle")).count(), 1, "and it is what the canvas shows");
+    assert_eq!(host.state(&app.session), before, "a preview is not a content change");
+}
+
+#[test]
+fn marking_saved_during_a_version_preview_marks_the_real_document() {
+    let (mut app, ctx, mut host) = previewing_an_older_version();
+    let at = ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}))["contentVersion"].as_u64().unwrap();
+    let saved = ok(&mut host, &mut app, &ctx, "host.markSaved", json!({"contentVersion": at}));
+    assert_eq!(saved["dirty"], json!(false));
+    assert!(app.session.ds_mut().unwrap().end_preview());
+    assert!(!host.state(&app.session).dirty, "still clean once the preview is over");
+}
