@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Host API harness</title>
+  <style>
+    body { margin: 0; font: 13px system-ui, sans-serif; display: grid; grid-template-columns: 1fr 320px; height: 100vh; }
+    #frame { width: 100%; height: 100%; border: 0; }
+    #frame.offscreen { position: fixed; left: -10000px; top: 0; width: 1px; height: 1px; }
+    #frame.none { display: none; }
+    #frame.tiny { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    aside { padding: 8px; overflow: auto; border-left: 1px solid #ccc; }
+    button { display: block; width: 100%; margin: 4px 0; }
+    pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <main><iframe id="frame" title="editor"></iframe></main>
+  <aside>
+    <button id="rect">engine.execute: add a rectangle</button>
+    <button id="inspect">document.inspect</button>
+    <button id="snapshot">host.snapshot, then host.openDocument</button>
+    <button id="mode">iframe: visible / offscreen 1x1 / in-view 1x1 transparent / display:none</button>
+    <pre id="log"></pre>
+  </aside>
+  <script>
+    // ?bundle=<origin of the served figcraft-web build>; extra query flags (webgl) pass through.
+    const query = new URLSearchParams(location.search);
+    const bundle = query.get('bundle') || 'http://127.0.0.1:8767';
+    const frame = document.getElementById('frame');
+    const flags = query.has('webgl') ? '&webgl' : '';
+    frame.src = `${bundle}/?ho=${encodeURIComponent(location.origin)}&ms=1${flags}`;
+
+    const pending = new Map();
+    const events = [];
+    let nextId = 1;
+    const log = (line) => { document.getElementById('log').textContent = line + '\n' + document.getElementById('log').textContent.slice(0, 4000); };
+
+    window.addEventListener('message', (e) => {
+      if (e.source !== frame.contentWindow || e.origin !== bundle) return;
+      const m = e.data;
+      if (m.method) {
+        events.push({ ...m, at: performance.now() });
+        log(`${m.method} ${m.params}`);
+        return;
+      }
+      const p = pending.get(m.id);
+      if (p) { pending.delete(m.id); p(m); }
+    });
+
+    // params and result stay JSON text: node ids exceed 2^53.
+    function call(method, params = '{}', timeoutMs = 10000) {
+      const id = nextId++;
+      const sent = performance.now();
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { pending.delete(id); resolve({ id, ok: false, error: { code: 'CANVAS_TIMEOUT' }, ms: performance.now() - sent }); }, timeoutMs);
+        pending.set(id, (m) => { clearTimeout(timer); resolve({ ...m, ms: performance.now() - sent }); });
+        frame.contentWindow.postMessage({ id, method, params, mountSeq: 1 }, bundle);
+      });
+    }
+    function ready() {
+      return new Promise((resolve) => {
+        const check = () => events.some((e) => e.method === 'event.ready') ? resolve() : setTimeout(check, 20);
+        check();
+      });
+    }
+    window.bridge = { call, ready, events, frame };
+
+    let n = 0;
+    document.getElementById('rect').onclick = async () => {
+      n += 1;
+      const r = await call('engine.execute', JSON.stringify({ command: 'shape.rectangle', params: { x: 40 * n, y: 40 * n, width: 120, height: 80 } }));
+      log(`execute ${r.ms.toFixed(1)} ms ${r.ok ? r.result : JSON.stringify(r.error)}`);
+    };
+    document.getElementById('inspect').onclick = async () => {
+      const r = await call('document.inspect', '{"depth":2}');
+      log(`inspect ${r.ms.toFixed(1)} ms ${r.ok ? r.result.slice(0, 600) : JSON.stringify(r.error)}`);
+    };
+    document.getElementById('snapshot').onclick = async () => {
+      const s = await call('host.snapshot');
+      if (!s.ok) return log(JSON.stringify(s.error));
+      const snap = JSON.parse(s.result);
+      const o = await call('host.openDocument', JSON.stringify({ bytes: snap.bytes }));
+      log(`snapshot v${snap.contentVersion} ${snap.bytes.length} b64 chars; reopened ${o.ok ? o.result : JSON.stringify(o.error)}`);
+    };
+    const modes = ['', 'offscreen', 'tiny', 'none'];
+    document.getElementById('mode').onclick = () => {
+      const next = modes[(modes.indexOf(frame.className) + 1) % modes.length];
+      frame.className = next;
+      log(`iframe mode: ${next || 'visible'}`);
+    };
+  </script>
+</body>
+</html>

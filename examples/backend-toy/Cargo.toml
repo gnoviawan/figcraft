@@ -1,0 +1,15 @@
+# An out-of-tree `figcraft_mcp::Backend`: proves a host (Termul) can implement the trait in its own
+# crate and forward every call as JSON text to an embedded editor. Not a workspace member.
+#   cargo test --manifest-path examples/backend-toy/Cargo.toml
+[package]
+name = "backend-toy"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+figcraft-mcp = { path = "../../crates/mcp" }
+serde_json = "1"
+base64 = "0.22"
