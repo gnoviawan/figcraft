@@ -299,3 +299,21 @@ fn help_rows_follow_the_shell_and_the_brand() {
     assert_eq!(commands(Shell::Full, true), kept);
     assert_eq!(commands(Shell::Kiosk, true), kept);
 }
+
+#[test]
+fn about_keeps_its_attribution_and_shows_the_artcraft_mark_only_in_an_upstream_build() {
+    let mut u = ui(Shell::Kiosk);
+    u.app.ui.about = true;
+    u.frame(vec![]);
+    let shown = on_screen(&mut u).join("\n");
+    assert!(shown.contains("Version"), "About is open: {shown}");
+    if crate::brand::REBRANDED {
+        assert!(shown.contains(crate::brand::ATTRIBUTION), "{shown}");
+        let without_attribution = shown.replace(crate::brand::ATTRIBUTION, "");
+        for mark in ["ArtCraft", "artcraft", "Discord"] {
+            assert!(!without_attribution.contains(mark), "{mark} in a rebranded About: {shown}");
+        }
+    } else {
+        assert!(shown.contains("getartcraft.com/apps/figcraft") && shown.contains("Discord"), "{shown}");
+    }
+}
