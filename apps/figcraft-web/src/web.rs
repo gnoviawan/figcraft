@@ -26,11 +26,20 @@ pub fn start() {
         {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
-        let result = eframe::WebRunner::new()
+        let runner = eframe::WebRunner::new();
+        // Framed by a host page (`?ho=`): it drives the editor over postMessage.
+        let link = crate::bridge::Link::from_page();
+        if let Some(link) = &link {
+            crate::bridge::report_panics();
+            if let Err(e) = crate::bridge::listen(runner.clone(), link.clone()) {
+                log::error!("host bridge: couldn't listen for messages: {e:?}");
+            }
+        }
+        let result = runner
             .start(
                 canvas,
                 options,
-                Box::new(|cc| {
+                Box::new(move |cc| {
                     if let Some(rs) = &cc.wgpu_render_state {
                         log::info!("figcraft-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                     }
@@ -47,7 +56,7 @@ pub fn start() {
                         let link = js_sys::decode_uri_component(link).ok().and_then(|s| s.as_string()).unwrap_or_else(|| link.to_string());
                         figcraft_ui_egui::live::open_invite(&mut fig, &link);
                     }
-                    Ok(Box::new(WebShell { fig }))
+                    Ok(Box::new(WebShell { fig, ctx: cc.egui_ctx.clone(), embed: link.map(crate::bridge::Embed::new) }))
                 }),
             )
             .await;
@@ -64,14 +73,24 @@ fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
 }
 
-struct WebShell {
-    fig: FigApp,
+pub(crate) struct WebShell {
+    pub(crate) fig: FigApp,
+    pub(crate) ctx: egui::Context,
+    pub(crate) embed: Option<crate::bridge::Embed>,
 }
 
 impl eframe::App for WebShell {
     // `FigApp::ui` runs its own per-frame logic first (fonts, theme), like the desktop app.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.fig.ui(ui);
+        if let Some(embed) = &mut self.embed {
+            embed.after_frame(&self.fig);
+        }
+    }
+
+    // The host bridge reaches the app through `WebRunner::app_mut`.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(&mut *self)
     }
 }
 
