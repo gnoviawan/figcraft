@@ -148,13 +148,17 @@ them again.
   The keys, which are the English text in the code, stay as they are.
   `crates/ui-egui/src/brand.rs` holds the name for the strings outside the catalogs: the About
   title, the home sidebar, window titles, the engine's command labels and the web loading text.
+- The static page, which shows before the wasm starts, takes the name too. A trunk post_build hook
+  (`packaging/web/brand-index.sh`) writes it into `index.html`'s `<title>` and "Loading ..." text,
+  so `trunk build` and `packaging/web/package.sh` both do it. The hook needs `sh` and `awk` on
+  PATH. `.github/workflows/termul-release.yml` fails the build when the name is missing from the
+  wasm or from the page.
 - A rebranded About shows the name and version, then only the plain text "Based on FigCraft by the
   ArtCraft team.". It has no ArtCraft name, link, Discord link or logo tile.
 - Left as is:
   - The `.figcraft` file extension.
   - Engine and format error messages, such as "not a valid FigCraft file".
   - The Help menu's link to getartcraft.com. The kiosk build hides that menu.
-  - The static `index.html`, which says "Loading FigCraft…" until the wasm starts.
   - FigCraft's own chameleon-tail glyph (`Icon::Logo`, original MIT artwork, not an ArtCraft mark)
     on the rail's main-menu button and the document tabs. The kiosk build hides both.
 

@@ -29,6 +29,7 @@ env:
   TRUNK_VERSION: "0.21.14"
   WASM_BINDGEN_VERSION: "0.2.129"
   BINARYEN_VERSION: "123"
+  FIGCRAFT_BRAND_NAME: "Termul Canvas"
 
 jobs:
   build:
@@ -94,7 +95,6 @@ jobs:
 
       - name: Build the web bundle, enforce the 24 MiB wasm gate and zip
         env:
-          FIGCRAFT_BRAND_NAME: "Termul Canvas"
           DIST: ${{ runner.temp }}/release
         run: |
           set -euo pipefail
@@ -116,6 +116,12 @@ jobs:
           [ -n "$wasm" ] || { echo "::error::wasm missing"; exit 1; }
           unzip -p "$zip" "$wasm" | grep -aF "$TAG" >/dev/null \
             || { echo "::error::FIGCRAFT_HOST_TAG '$TAG' is not stamped into the wasm"; exit 1; }
+          unzip -p "$zip" "$wasm" | grep -aF "$FIGCRAFT_BRAND_NAME" >/dev/null \
+            || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not in the wasm"; exit 1; }
+          unzip -p "$zip" "$root/index.html" | grep -F "<title>$FIGCRAFT_BRAND_NAME</title>" >/dev/null \
+            || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not the <title> of index.html"; exit 1; }
+          unzip -p "$zip" "$root/index.html" | grep -F "Loading $FIGCRAFT_BRAND_NAME&hellip;" >/dev/null \
+            || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not in the loading text of index.html"; exit 1; }
           echo "$entries"
 
       - name: Write SHA256SUMS.txt

@@ -8,3 +8,8 @@ filehash = true
 [serve]
 addresses = ["127.0.0.1"]
 port = 8767
+
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["../../packaging/web/brand-index.sh"]
