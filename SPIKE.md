@@ -158,9 +158,10 @@ them again.
 - Left as is:
   - The `.figcraft` file extension.
   - Engine and format error messages, such as "not a valid FigCraft file".
-  - The Help menu's link to getartcraft.com. The kiosk build hides that menu.
+  - The Help menu's "Help page" link to getartcraft.com. A kiosk or rebranded build drops that row and "Getting started" (`toolbar::help_rows`) and keeps "Keyboard shortcuts" and About.
   - FigCraft's own chameleon-tail glyph (`Icon::Logo`, original MIT artwork, not an ArtCraft mark)
     on the rail's main-menu button and the document tabs. The kiosk build hides both.
+  - A kiosk also hides the Share button and the people bar (avatars, spotlight menu) at the top right of the right panel. Present stays, in the corner Share left.
 
 ### Verified
 
@@ -173,7 +174,7 @@ and About reads "Über Termul Canvas".
 Not themed by the tokens:
 
 - The canvas page colour, which is document data.
-- Canvas overlays and the Share button, which use the `ACCENT` constant rather than `Tokens`.
+- Canvas overlays, which use the `ACCENT` constant rather than `Tokens`.
 
 In the built wasm, every "ArtCraft" is in one of these places:
 
