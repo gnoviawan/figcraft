@@ -216,3 +216,45 @@ fn kiosk_hands_nothing_over_as_a_download_and_the_browser_still_does_outside_it(
     assert_eq!(downloaded(Shell::Kiosk), 0);
     assert_eq!(downloaded(Shell::Full), 1);
 }
+
+/// Every name and text AccessKit has for the frame after the one the caller last ran.
+fn on_screen(u: &mut Ui) -> Vec<String> {
+    u.ctx.enable_accesskit();
+    let update = u.frame_output(vec![]).platform_output.accesskit_update.expect("the first frame after enabling AccessKit sends the tree");
+    update.nodes.into_iter().map(|(_, n)| n).flat_map(|n| [n.label().map(str::to_string), n.value().map(str::to_string)]).flatten().collect()
+}
+
+const SHARE: &str = "Share: live session, export";
+const PEOPLE: &str = "People in this file";
+const PRESENT: &str = "Present or preview";
+
+#[test]
+fn kiosk_hides_share_and_the_people_bar_and_keeps_present() {
+    let mut kiosk = ui(Shell::Kiosk);
+    let shown = on_screen(&mut kiosk);
+    assert!(shown.iter().any(|t| t == PRESENT), "Play stays in a kiosk: {shown:?}");
+    for gone in [SHARE, PEOPLE] {
+        assert!(!shown.iter().any(|t| t == gone), "{gone} shows in a kiosk");
+    }
+}
+
+#[test]
+fn outside_kiosk_the_top_bar_still_has_share_and_the_people_bar() {
+    let shown = on_screen(&mut ui(Shell::Full));
+    for kept in [SHARE, PEOPLE, PRESENT] {
+        assert!(shown.iter().any(|t| t == kept), "{kept} is missing: {shown:?}");
+    }
+}
+
+#[test]
+fn kiosk_keeps_present_clickable_where_share_would_have_pushed_it() {
+    let right_edge = |shell| {
+        let mut u = ui(shell);
+        let update = {
+            u.ctx.enable_accesskit();
+            u.frame_output(vec![]).platform_output.accesskit_update.unwrap()
+        };
+        update.nodes.into_iter().map(|(_, n)| n).find(|n| n.label() == Some(PRESENT)).map(|n| n.bounds().unwrap().x1).unwrap()
+    };
+    assert!(right_edge(Shell::Kiosk) > right_edge(Shell::Full) + 40.0, "Present takes the corner Share left");
+}

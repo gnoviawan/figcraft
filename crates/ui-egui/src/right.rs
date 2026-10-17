@@ -81,18 +81,24 @@ impl FigApp {
 pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
-    // Top bar: people (you and the others in a live session), present, share.
+    // Top bar: people (you and the others in a live session), present, share. A kiosk host owns
+    // collaboration, so the bar keeps only Present.
     let (top, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());
-    // As wide as its label needs (longer in some languages).
-    let label = ui.painter().layout_no_wrap(tr("Share").to_string(), semibold(11.5), Color32::WHITE);
-    let sw = (label.size().x + 24.0).max(56.0);
-    let share = Rect::from_min_size(pos2(top.max.x - 14.0 - sw, top.center().y - 16.0), vec2(sw, 32.0));
-    let sresp = ui.interact(share, ui.id().with("share"), Sense::click()).tip(tr("Share: live session, export"));
-    ui.painter().rect_filled(share, CornerRadius::same(6), if sresp.hovered() { t.accent_hover } else { ACCENT });
-    ui.painter().galley(share.center() - label.size() / 2.0, label, Color32::WHITE);
-    crate::live::share_popover(app, &sresp);
+    let collaboration = !app.shell.is_kiosk();
+    let mut play_right = top.max.x - 8.0;
+    if collaboration {
+        // As wide as its label needs (longer in some languages).
+        let label = ui.painter().layout_no_wrap(tr("Share").to_string(), semibold(11.5), Color32::WHITE);
+        let sw = (label.size().x + 24.0).max(56.0);
+        let share = Rect::from_min_size(pos2(top.max.x - 14.0 - sw, top.center().y - 16.0), vec2(sw, 32.0));
+        let sresp = ui.interact(share, ui.id().with("share"), Sense::click()).tip(tr("Share: live session, export"));
+        ui.painter().rect_filled(share, CornerRadius::same(6), if sresp.hovered() { t.accent_hover } else { ACCENT });
+        ui.painter().galley(share.center() - label.size() / 2.0, label, Color32::WHITE);
+        crate::live::share_popover(app, &sresp);
+        play_right = share.min.x - 8.0;
+    }
     // Play presents; its chevron opens the play menu (present, or preview in a pane).
-    let play = Rect::from_min_size(pos2(share.min.x - 50.0, top.center().y - 14.0), vec2(42.0, 28.0));
+    let play = Rect::from_min_size(pos2(play_right - 42.0, top.center().y - 14.0), vec2(42.0, 28.0));
     let (tri_r, chev_r) =
         (Rect::from_min_max(play.min, pos2(play.max.x - 16.0, play.max.y)), Rect::from_min_max(pos2(play.max.x - 16.0, play.min.y), play.max));
     let present_keys = crate::toolbar::pretty_shortcut(crate::shortcuts::shortcut("proto.present").unwrap_or(""));
@@ -105,7 +111,9 @@ pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let c = tri.center();
     ui.painter().add(egui::Shape::closed_line(vec![c + vec2(-5.0, -7.0), c + vec2(7.0, 0.0), c + vec2(-5.0, 7.0)], Stroke::new(1.4, t.icon)));
     icons::paint(ui.painter(), Rect::from_center_size(play.center() + vec2(12.0, 0.0), vec2(10.0, 10.0)), Icon::Chevron, t.icon_secondary);
-    crate::live::people_bar(app, ui, Rect::from_min_max(pos2(top.min.x + 12.0, top.min.y), pos2(play.min.x - 6.0, top.max.y)));
+    if collaboration {
+        crate::live::people_bar(app, ui, Rect::from_min_max(pos2(top.min.x + 12.0, top.min.y), pos2(play.min.x - 6.0, top.max.y)));
+    }
     if presp.clicked() {
         app.run("proto.present", json!({}));
     }
