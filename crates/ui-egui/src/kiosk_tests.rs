@@ -258,3 +258,44 @@ fn kiosk_keeps_present_clickable_where_share_would_have_pushed_it() {
     };
     assert!(right_edge(Shell::Kiosk) > right_edge(Shell::Full) + 40.0, "Present takes the corner Share left");
 }
+
+fn help_rows(shell: Shell) -> Vec<String> {
+    let mut u = ui(shell);
+    let canvas = u.app.canvas.rect;
+    let help = Pos2::new(canvas.max.x - 32.0, canvas.max.y - 32.0);
+    u.button(help, true);
+    u.button(help, false);
+    u.frame(vec![]);
+    on_screen(&mut u)
+}
+
+#[test]
+fn the_help_menu_keeps_shortcuts_and_about_and_drops_upstream_links_in_a_kiosk() {
+    let rows = help_rows(Shell::Kiosk);
+    for kept in ["Keyboard shortcuts", &format!("About {}", crate::brand::NAME)] {
+        assert!(rows.iter().any(|t| t.starts_with(kept)), "{kept} is missing: {rows:?}");
+    }
+    for gone in ["Getting started", "Help page"] {
+        assert!(!rows.iter().any(|t| t.starts_with(gone)), "{gone} shows in a kiosk");
+    }
+}
+
+#[test]
+fn outside_kiosk_the_help_menu_lists_every_row_unless_the_build_is_rebranded() {
+    let rows = help_rows(Shell::Full);
+    let shows = |label: &str| rows.iter().any(|t| t.starts_with(label));
+    assert!(shows("Keyboard shortcuts"));
+    assert_eq!(shows("Getting started"), !crate::brand::REBRANDED, "{rows:?}");
+    assert_eq!(shows("Help page"), !crate::brand::REBRANDED, "{rows:?}");
+}
+
+#[test]
+fn help_rows_follow_the_shell_and_the_brand() {
+    let commands = |shell, rebranded| crate::toolbar::help_rows(shell, rebranded).map(|(_, c)| c).collect::<Vec<_>>();
+    let all = vec!["help.gettingStarted", "help.shortcuts", "help.page", "help.about"];
+    let kept = vec!["help.shortcuts", "help.about"];
+    assert_eq!(commands(Shell::Full, false), all);
+    assert_eq!(commands(Shell::Kiosk, false), kept);
+    assert_eq!(commands(Shell::Full, true), kept);
+    assert_eq!(commands(Shell::Kiosk, true), kept);
+}

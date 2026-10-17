@@ -206,18 +206,29 @@ fn main_toolbar(app: &mut FigApp, ui: &mut Ui, canvas: Rect, t: &Tokens) {
     ui.painter().circle_filled(hr.center(), 16.0, t.panel);
     ui.painter().text(hr.center(), Align2::CENTER_CENTER, "?", crate::theme::regular(15.0), t.text);
     crate::right::menu_popup(&hresp).show(|ui| {
-        for (l, c) in [
-            (tr("Getting started"), "help.gettingStarted"),
-            (tr("Keyboard shortcuts"), "help.shortcuts"),
-            (tr("Help page"), "help.page"),
-            (tr("About FigCraft"), "help.about"),
-        ] {
+        for (l, c) in help_rows(app.shell, crate::brand::REBRANDED) {
+            let l = tr(l);
             if crate::right::menu_item(ui, l, crate::shortcuts::shortcut(c).unwrap_or("")) {
                 app.run(c, json!({}));
                 ui.close();
             }
         }
     });
+}
+
+/// The help menu: (label, command, leads to upstream's site or home-screen tips).
+const HELP: &[(&str, &str, bool)] = &[
+    (tr_noop("Getting started"), "help.gettingStarted", true),
+    (tr_noop("Keyboard shortcuts"), "help.shortcuts", false),
+    (tr_noop("Help page"), "help.page", true),
+    (tr_noop("About FigCraft"), "help.about", false),
+];
+
+/// The help menu's rows. A kiosk or rebranded build drops the ones that open getartcraft.com or the
+/// home screen's tips, which a kiosk never shows.
+pub(crate) fn help_rows(shell: crate::Shell, rebranded: bool) -> impl Iterator<Item = (&'static str, &'static str)> {
+    let hide_upstream = shell.is_kiosk() || rebranded;
+    HELP.iter().filter(move |(.., upstream)| !(hide_upstream && *upstream)).map(|(label, command, _)| (*label, *command))
 }
 
 /// The pill shown for a file you can't edit now: Move and Hand, and a badge saying why ("View
