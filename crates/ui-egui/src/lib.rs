@@ -9,6 +9,7 @@ pub mod a11y;
 pub mod assets_panel;
 pub mod bidi;
 pub mod branch_ui;
+pub mod brand;
 pub mod canvas;
 pub mod cjk;
 pub mod colorpicker;

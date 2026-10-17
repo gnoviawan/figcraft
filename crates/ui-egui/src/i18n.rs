@@ -234,7 +234,7 @@ fn label<'a>(menu: bool, id: &str, english: &'a str) -> Cow<'a, str> {
     match text {
         Some(Text::Plain(s) | Text::Plural { other: s, .. }) if english.ends_with('…') && !s.ends_with('…') => Cow::Owned(format!("{s}…")),
         Some(Text::Plain(s) | Text::Plural { other: s, .. }) => Cow::Borrowed(s),
-        None => Cow::Borrowed(english),
+        None => crate::brand::rename(english),
     }
 }
 

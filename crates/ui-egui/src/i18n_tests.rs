@@ -267,7 +267,9 @@ fn english_text_is_its_key_except_plurals() {
     for (k, t) in english().ui {
         if let Text::Plain(s) = t {
             // "Fill|sizing": the same English as "Fill", translated apart (a context after `|`).
-            assert_eq!(k.split('|').next(), Some(*s), "an English entry differs from its key (the key is the English text)");
+            // A rebranded build names itself in the text (build.rs), never in the key.
+            let english = k.split('|').next().map(crate::brand::rename);
+            assert_eq!(english.as_deref(), Some(*s), "an English entry differs from its key (the key is the English text)");
         }
     }
     assert!(english().commands.is_empty() && english().menu.is_empty(), "English command labels come from the engine");
