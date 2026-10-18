@@ -216,7 +216,7 @@ impl Guests {
                 (g.name, g.color, g.page, g.target) = (name, color, page, at);
             }
             None => {
-                let phase = id.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b))) as f32 % 6.283;
+                let phase = id.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(b))) as f32 % std::f32::consts::TAU;
                 self.guests.insert(
                     id.to_string(),
                     Guest {
