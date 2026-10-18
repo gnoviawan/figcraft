@@ -190,6 +190,68 @@ Every "FigCraft" is in one of these places:
 The test `brand::tests::a_rebranded_build_shows_no_upstream_name_or_artcraft_mark` checks every
 catalog value in every language.
 
+## Guest presence (patch area 5)
+
+Termul shows each agent working on the canvas as a guest: a pointer with a name tag in the
+agent's colour, and a ring on the nodes it writes or reads. The host decides where a guest goes.
+The editor only draws it. Guests live in the window: they are never synced or saved, never touch
+the document, `contentVersion`, the dirty flag or undo, and never move the view.
+
+### Methods
+
+All three are host-only, return `{}`, and work in a kiosk and while the canvas is hidden. A hidden
+canvas keeps the state and draws it once frames run again.
+
+- `host.guestCursor {id, name, color, x, y, page?}`.
+  - `id` and `name` are text. The name tag shows at most 64 characters.
+  - `color` is `#rrggbb`.
+  - `x` and `y` are page coordinates, the same space as `absoluteBounds`.
+  - `page` is an optional page node id (text, like every node id). With it, the guest shows only
+    while that page is in front. Without it, the guest shows on any page.
+  - The first call creates the guest at its target with a 200 ms fade-in. Later calls glide it
+    there (exponential approach at 2.5/s). Reduced motion jumps instead.
+- `host.guestFlash {id, ids, kind}`.
+  - `ids` is an array of node ids. `kind` is `"write"` or `"read"`.
+  - A write ring grows in over 200 ms, holds 400 ms and releases over 300 ms. A read ring holds
+    1.5 s with a scan band sweeping down the node. Reduced motion keeps only the fades.
+  - Rings show only for nodes on the page in front. An unknown node is skipped.
+  - A flash also counts as an update for the idle timer.
+- `host.guestHide {id}` fades the guest out over 1.5 s and drops it.
+
+An unknown guest `id` on `guestFlash` or `guestHide` is a no-op that still returns `{}`. A missing or
+malformed parameter is `ENGINE_ERROR`.
+
+### Lifecycle
+
+- A guest with no update for 5 s fades out over 1.5 s on its own, so a host that dies leaves no
+  pointer. The clock keeps running while no frames are drawn.
+- An update during a fade brings the guest back from the opacity it had, without a pop.
+- A pointer at rest drifts about 4 points. A gliding one does not.
+- A pointer outside the view shows as a small arrow on the canvas edge pointing toward it, with
+  the name.
+- Guests are keyed by `id` and independent. Each keeps at most 100 rings.
+- Frames are asked for while a guest drifts, glides, fades or rings. Under reduced motion a still
+  guest asks for one frame when its fade is due.
+
+### Where it lives
+
+- `crates/ui-egui/src/guests.rs` holds the model and the drawing. Tests are in `guests_tests.rs`.
+- The drawing reuses `live::pointer`, `live::name_tag` and `canvas::node_quad`. It runs right after
+  `live::draw`, outside its "no peers" early return.
+- `UiState::guests` holds the state. `ui.inspect` reports it as `guests`.
+- `apps/figcraft-web/src/host.rs` parses the three methods. Tests are in `host_tests.rs`.
+- `spike/guests.mjs` drives the methods in a kiosk mount and saves `guests-*.png`.
+
+### Verified
+
+`spike/guests.mjs` ran against a `FIGCRAFT_BRAND_NAME="Termul Canvas"` release bundle in headless
+Edge, with all 12 checks passing. One agent visits three rectangles, rings one as a write and one
+as a read, and a second agent joins. One target is off screen, then the first agent hides and the
+second fades out on its own. `contentVersion` stayed the same and no `event.dirtyChanged` fired.
+The screenshots are `guests-1-write.png` to `guests-7-hidden.png`, and `guests.webm` records the
+whole run. Playwright's video needs its ffmpeg; `PLAYWRIGHT_BROWSERS_PATH=D:/devtools/ms-playwright`
+has it on this machine. Without it the script runs and skips the video.
+
 ## Measurements
 
 Harness: `apps/figcraft-web/spike/`.
