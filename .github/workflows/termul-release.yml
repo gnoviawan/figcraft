@@ -30,15 +30,29 @@ env:
   WASM_BINDGEN_VERSION: "0.2.129"
   BINARYEN_VERSION: "123"
   FIGCRAFT_BRAND_NAME: "Termul Canvas"
+  # Same pin as release.yml. It must be a commit with fonts/latin-manifest.txt (Inter), which main
+  # does not have yet; the wasm build embeds nothing without Inter and text then has no width.
+  CRAFT_FONTS_REF: "43913056ce82a3fdad0ef69f6b88d1dc922a8104"
+  CRAFT_FONTS_REQUIRED: "1"
 
 jobs:
   build:
     name: Build web bundle
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Check out craft-fonts at the pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: craft-fonts
           persist-credentials: false
 
       - name: Resolve and validate the tag
@@ -122,6 +136,11 @@ jobs:
             || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not the <title> of index.html"; exit 1; }
           unzip -p "$zip" "$root/index.html" | grep -F "Loading $FIGCRAFT_BRAND_NAME&hellip;" >/dev/null \
             || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not in the loading text of index.html"; exit 1; }
+          # Inter's name table is UTF-16BE, so this only matches font bytes, not a "Inter" string literal.
+          unzip -p "$zip" "$wasm" | LC_ALL=C grep -aP '\x00I\x00n\x00t\x00e\x00r\x00 \x00P\x00r\x00o\x00j\x00e\x00c\x00t' >/dev/null \
+            || { echo "::error::craft-fonts (Inter) is not embedded in the wasm; text would have no width"; exit 1; }
+          grep -qx "$root/OFL-inter.txt" <<<"$entries" \
+            || { echo "::error::$root/OFL-inter.txt missing; the OFL requires the licence to travel with the font"; exit 1; }
           echo "$entries"
 
       - name: Write SHA256SUMS.txt
