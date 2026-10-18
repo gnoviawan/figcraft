@@ -9,6 +9,7 @@ use std::sync::mpsc::Receiver;
 use base64::Engine as _;
 use figcraft_doc::{Document, ExportFormat, NodeId};
 use figcraft_engine::{DocState, Session};
+use figcraft_ui_egui::guests::FlashKind;
 use figcraft_ui_egui::theme::{HostPalette, Tokens};
 use figcraft_ui_egui::{ControlReply, ControlRequest, FigApp, i18n};
 use serde_json::{Value, json};
@@ -51,6 +52,9 @@ enum HostMethod {
     Theme,
     Locale,
     Describe,
+    GuestCursor,
+    GuestFlash,
+    GuestHide,
 }
 
 const HOST_METHODS: &[(&str, HostMethod)] = &[
@@ -62,6 +66,9 @@ const HOST_METHODS: &[(&str, HostMethod)] = &[
     ("host.theme", HostMethod::Theme),
     ("host.locale", HostMethod::Locale),
     ("host.describe", HostMethod::Describe),
+    ("host.guestCursor", HostMethod::GuestCursor),
+    ("host.guestFlash", HostMethod::GuestFlash),
+    ("host.guestHide", HostMethod::GuestHide),
 ];
 
 /// Control methods that act on the session alone: answered at once, outside any frame.
@@ -254,8 +261,52 @@ impl Host {
                 Ok(json!({"language": i18n::current().map_or("en", |l| l.code)}))
             }
             HostMethod::Describe => Ok(json!({"tag": option_env!("FIGCRAFT_HOST_TAG").unwrap_or("dev"), "engineVersion": env!("CARGO_PKG_VERSION")})),
+            HostMethod::GuestCursor => {
+                let (id, name) = (text(p, "id")?, text(p, "name")?);
+                let color = text(p, "color")?;
+                let color = hex(color).ok_or_else(|| engine_error(format!("`color` is not #rrggbb: `{color}`")))?;
+                let at = (number(p, "x")?, number(p, "y")?);
+                let page = match p.get("page") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(figcraft_engine::params::id_of(v).ok_or_else(|| engine_error("`page` is not a node id"))?),
+                };
+                let guests = &mut app.ui.guests;
+                guests.cursor(guests.now(), id, name, color, at, page);
+                Ok(json!({}))
+            }
+            HostMethod::GuestFlash => {
+                let id = text(p, "id")?;
+                let ids = p.get("ids").and_then(Value::as_array).ok_or_else(|| engine_error("`ids` (node ids) required"))?;
+                let nodes = ids
+                    .iter()
+                    .map(figcraft_engine::params::id_of)
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| engine_error("`ids` holds something that is not a node id"))?;
+                let kind = p
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .and_then(FlashKind::parse)
+                    .ok_or_else(|| engine_error("`kind` must be \"write\" or \"read\""))?;
+                let guests = &mut app.ui.guests;
+                guests.flash(guests.now(), id, &nodes, kind);
+                Ok(json!({}))
+            }
+            HostMethod::GuestHide => {
+                let id = text(p, "id")?;
+                let guests = &mut app.ui.guests;
+                guests.hide(guests.now(), id);
+                Ok(json!({}))
+            }
         }
     }
+}
+
+fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str, HostError> {
+    p.get(key).and_then(Value::as_str).ok_or_else(|| engine_error(format!("`{key}` (text) required")))
+}
+
+fn number(p: &Value, key: &str) -> Result<f64, HostError> {
+    p.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| engine_error(format!("`{key}` (number) required")))
 }
 
 /// Runs `f` with the document itself in `ds.doc`, not the version or live text preview shown in

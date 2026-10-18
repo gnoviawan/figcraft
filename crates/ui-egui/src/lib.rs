@@ -28,6 +28,7 @@ pub mod frame_labels;
 pub mod frame_presets;
 pub mod frame_stats;
 pub mod guides;
+pub mod guests;
 pub mod handles;
 pub mod home;
 pub mod home_recents;
@@ -112,6 +113,8 @@ mod gap_handle_tests;
 mod gradient_shorthand_tests;
 #[cfg(test)]
 mod guide_release_tests;
+#[cfg(test)]
+mod guests_tests;
 #[cfg(test)]
 mod home_recents_tests;
 #[cfg(test)]
@@ -575,6 +578,8 @@ pub struct UiState {
     pub plugin_form: Option<plugins_ui::PluginForm>,
     /// Live sessions: remote cursors as drawn, the Join dialog.
     pub live: live::LiveUi,
+    /// An embedding host's agents shown on the canvas (`host.guest*`).
+    pub guests: guests::Guests,
     /// Home ▸ Online.
     pub online: online::OnlineUi,
     /// The window was asked to close with unsaved changes: the question shows.
@@ -673,6 +678,7 @@ impl Default for UiState {
             plugins_manage: plugins_ui::PluginsWindow::default(),
             plugin_form: None,
             live: live::LiveUi::default(),
+            guests: guests::Guests::default(),
             online: online::OnlineUi::default(),
             confirm_close: false,
         }
@@ -1704,6 +1710,7 @@ impl FigApp {
             "importReport": self.ui.import_report.as_ref().map(import_report::Report::inspect),
         });
         state["pendingOpens"] = json!(self.ui.pending_opens.len());
+        state["guests"] = guests::inspect(self);
         state
     }
 }

@@ -343,3 +343,88 @@ fn a_ui_method_is_answered_on_its_receiver_once_frames_run() {
     let answered = reply.try_recv().expect("the frame answered");
     assert!(answered.result.is_ok(), "{:?}", answered.result);
 }
+
+fn guests(app: &FigApp) -> Vec<Value> {
+    app.inspect()["guests"].as_array().cloned().unwrap_or_default()
+}
+
+fn undo_len(app: &FigApp) -> usize {
+    app.session.ds().unwrap().history.undo.len()
+}
+
+#[test]
+fn guests_show_ring_and_hide_without_touching_the_document() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = app();
+    host.mark_ready(&app.session);
+    rect(&mut host, &mut app, &ctx);
+    let node = app.session.selection()[0].0.to_string();
+    let (before, undo, doc) = (host.state(&app.session), undo_len(&app), app.session.ds().unwrap().document_itself().clone());
+    host.changed(&app.session);
+    let page = app.session.page().unwrap().0.to_string();
+    let cursor = json!({"id": "s1", "name": "Claude", "color": "#3B82F6", "x": 20.0, "y": 10.0, "page": page});
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.guestCursor", cursor), json!({}));
+    assert_eq!(
+        ok(&mut host, &mut app, &ctx, "host.guestCursor", json!({"id": "s2", "name": "opencode", "color": "#ec4899", "x": 300, "y": 200})),
+        json!({})
+    );
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.guestFlash", json!({"id": "s1", "ids": [node], "kind": "write"})), json!({}));
+    frame(&ctx, &mut app);
+    frame(&ctx, &mut app);
+    let shown = guests(&app);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert_eq!((shown[0]["id"].clone(), shown[0]["name"].clone(), shown[0]["color"].clone()), (json!("s1"), json!("Claude"), json!("#3b82f6")));
+    assert_eq!(shown[0]["flashes"], json!([{"id": node, "kind": "write"}]));
+    assert_eq!(shown[0]["target"], json!([20.0, 10.0]));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.guestFlash", json!({"id": "s2", "ids": [node], "kind": "read"})), json!({}));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.guestHide", json!({"id": "s2"})), json!({}));
+    frame(&ctx, &mut app);
+    let doc_now = app.session.ds().unwrap().document_itself().clone();
+    assert!(std::sync::Arc::ptr_eq(&doc, &doc_now), "the document is the same object");
+    assert_eq!(host.state(&app.session), before, "contentVersion and dirty unchanged");
+    assert_eq!(host.changed(&app.session), None, "no dirtyChanged event");
+    assert_eq!(undo_len(&app), undo, "nothing to undo");
+}
+
+#[test]
+fn guest_calls_for_unknown_guests_are_no_ops() {
+    let (mut app, ctx, mut host) = app();
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.guestFlash", json!({"id": "ghost", "ids": ["12"], "kind": "read"})), json!({}));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.guestHide", json!({"id": "ghost"})), json!({}));
+    assert!(guests(&app).is_empty());
+}
+
+#[test]
+fn guest_calls_with_bad_params_are_engine_errors() {
+    let (mut app, ctx, mut host) = app();
+    let bad = [
+        ("host.guestCursor", json!({"id": "s1", "name": "Claude", "x": 0, "y": 0})),
+        ("host.guestCursor", json!({"id": "s1", "name": "Claude", "color": "blue", "x": 0, "y": 0})),
+        ("host.guestCursor", json!({"id": "s1", "name": "Claude", "color": "#3b82f6", "x": "0", "y": 0})),
+        ("host.guestCursor", json!({"id": "s1", "name": "Claude", "color": "#3b82f6", "x": 0, "y": 0, "page": "first"})),
+        ("host.guestFlash", json!({"id": "s1", "ids": ["12"], "kind": "erase"})),
+        ("host.guestFlash", json!({"id": "s1", "ids": "12", "kind": "write"})),
+        ("host.guestFlash", json!({"id": "s1", "ids": ["x"], "kind": "write"})),
+        ("host.guestHide", json!({})),
+    ];
+    for (method, params) in bad {
+        let err = now(host.call(&mut app, &ctx, method, &params.to_string(), false)).unwrap_err();
+        assert_eq!(err.code, Code::EngineError, "{method} {params}");
+    }
+    assert!(guests(&app).is_empty());
+}
+
+#[test]
+fn guest_calls_work_in_a_kiosk_and_while_the_canvas_is_hidden() {
+    for (mut app, ctx, mut host) in [app(), kiosk_app()] {
+        let cursor = json!({"id": "s1", "name": "Claude", "color": "#3b82f6", "x": 0, "y": 0}).to_string();
+        for (method, params) in [
+            ("host.guestCursor", cursor.as_str()),
+            ("host.guestFlash", r#"{"id":"s1","ids":["5"],"kind":"write"}"#),
+            ("host.guestHide", r#"{"id":"s1"}"#),
+        ] {
+            assert_eq!(now(host.call(&mut app, &ctx, method, params, true)).unwrap(), "{}", "{method} kiosk={}", app.shell.is_kiosk());
+        }
+        assert_eq!(guests(&app).len(), 1, "the state updated without a frame");
+    }
+}
