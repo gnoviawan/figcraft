@@ -31,9 +31,10 @@ packaging/web/package.sh --skip-build   # 24 MiB wasm gate, then the zip
 
 This machine has no MSVC C++ build tools, so native builds used the `x86_64-pc-windows-gnu` 1.95.0
 toolchain (`RUSTUP_TOOLCHAIN=1.95.0-x86_64-pc-windows-gnu`) with a winlibs mingw-w64 GCC for `ring`.
-The bundle was built without `craft-fonts` (`CRAFT_FONTS_DIR` is missing here). `package.sh --skip-build`
-passed its size gate ("22360389 bytes (21 MiB; limit 25165824)") and then stopped, because this
-machine has no `zip`.
+The E-0 measurements below used a bundle built without `craft-fonts`, and that bundle has no fonts at
+all (see "Fonts (F7)"). Release bundles need `CRAFT_FONTS_DIR` and `CRAFT_FONTS_REQUIRED=1`.
+`package.sh --skip-build` passed its size gate on that bundle and then stopped, because this machine
+has no `zip`.
 
 The harness under `apps/figcraft-web/spike/` is handwritten HTML and JavaScript, which the repo's
 "Rust only" rule does not cover. It is spike tooling, not shipped code.
@@ -252,6 +253,71 @@ The screenshots are `guests-1-write.png` to `guests-7-hidden.png`, and `guests.w
 whole run. Playwright's video needs its ffmpeg; `PLAYWRIGHT_BROWSERS_PATH=D:/devtools/ms-playwright`
 has it on this machine. Without it the script runs and skips the video.
 
+## Fonts (F7)
+
+The first release bundle had no fonts: `text.fonts` returned `[]`, text layers were 1 px wide and
+text exports were empty. The wasm build cannot use system fonts, and `crates/text/build.rs` embeds
+fonts only from the optional `CRAFT_FONTS_DIR` build input (storytold/craft-fonts).
+
+- **Which craft-fonts commit.** `4391305` (`43913056ce82a3fdad0ef69f6b88d1dc922a8104`), the head of
+  craft-fonts' `pr/latin-presentation-fonts` branch. Upstream's own `release.yml` pins the same SHA.
+  craft-fonts `main` (`a71c20e`) has no `fonts/latin-manifest.txt`, and the web build embeds only
+  Inter (plus Noto Sans CJK with `FIGCRAFT_EMBED_CJK`), so a bundle built against `main` would again
+  embed nothing. Re-pin to `main` once the Latin manifest lands there. If that branch is deleted
+  before the SHA is reachable from `main`, `actions/checkout` can fail to fetch it. The workflow's
+  fonts check and the `CRAFT_FONTS_REQUIRED=1` build error make that a loud failure, not a silent
+  fontless release.
+- **What the wasm embeds.** Inter Regular, Italic, SemiBold and Bold (`fonts/latin-manifest.txt`;
+  1,669,200 B of font files in the checkout). Nothing else: the other
+  families are skipped for wasm32, and CJK stays out unless `FIGCRAFT_EMBED_CJK` is set.
+- **Local build.** `D:/git/craft-fonts` is a clone at that SHA (detached). Build with
+  `CRAFT_FONTS_DIR=D:/git/craft-fonts CRAFT_FONTS_REQUIRED=1 FIGCRAFT_BRAND_NAME="Termul Canvas" FIGCRAFT_HOST_TAG=dev trunk build --release`.
+  `.cargo/config.toml` already points at `../craft-fonts`, which is `D:/git/craft-fonts` for the
+  checkout and for worktrees named `D:/git/figcraft-<unit>`. Without `CRAFT_FONTS_REQUIRED=1` a
+  missing clone only warns and builds a fontless bundle, so always set it for a bundle you ship.
+- **Release workflow.** `termul-release.yml` checks out craft-fonts at `CRAFT_FONTS_REF` into
+  `craft-fonts/`, sets `CRAFT_FONTS_DIR` and `CRAFT_FONTS_REQUIRED=1`, and its zip check fails the
+  job when the wasm lacks Inter's UTF-16 name-table bytes or the zip lacks `OFL-inter.txt`.
+  `packaging/env.sh`'s `copy_font_licences` already writes `OFL-<family>.txt` for every family in
+  the checkout into the zip, so the licence travels with the bundle.
+
+### Size
+
+| Bundle | wasm bytes | vs 25,165,824 B gate |
+|---|---|---|
+| No fonts (E-0, `bb8b809` plus host API) | 22,391,412 | 2,774,412 B under |
+| Inter x4 embedded (this build) | 24,042,866 | 1,122,958 B (1.07 MiB) under |
+
+The delta is 1,651,454 B for four Inter faces. The gate holds, so nothing was changed there. It
+is a thin margin: each further Inter style costs about 0.4 MB, so the next two styles would use
+more than half of it. Options if it tightens (not needed now): embed Regular and Bold only (about
+0.8 MB less), subset the faces (no tool in craft-fonts for it), or fetch fonts as lazily loaded
+assets (needs a fork change outside the four patch areas).
+
+### Proof it renders
+
+`spike/fonts-text.mjs` against that bundle in headless Edge (1600x900, WebGPU), all checks pass:
+`text.fonts` is `["Inter"]`, `text.fonts {family: "Inter"}` lists Regular, Italic, SemiBold and
+Bold, a `text.create` of "Termul Canvas text" at 64 px has width 583 and height 77 (G1 saw 1 px),
+`host.renderPng` of it is an 8,117-byte PNG, and `spike/fonts-text.png` shows the text on the
+canvas and in the Layers panel.
+
+### Licences and attribution for Termul
+
+- Inter is SIL OFL 1.1, "Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)".
+  The licence file declares no Reserved Font Name. The files are used unmodified (craft-fonts checks
+  each SHA-256).
+- The OFL allows embedding and redistributing the font inside software, including a commercial
+  product, as long as the licence text and copyright notice travel with it and the font is not sold
+  on its own. So redistribution inside Termul is allowed.
+- **Action for Termul (not done here).** Ship `OFL-inter.txt` (it is in the release zip, and in
+  craft-fonts at `fonts/inter/OFL.txt`) with the app's third-party notices, and add one line to its
+  NOTICE or About credits: "Inter, Copyright (c) 2016 The Inter Project Authors, SIL Open Font
+  License 1.1". Termul's own bundle only needs Inter. The zip also carries `OFL-*.txt` for the 20
+  families it does not embed, which can be dropped from Termul's copy.
+- Upstream's `NOTICE` and `ATTRIBUTION.md` already describe craft-fonts' fonts. The fork's brand
+  knob leaves them alone.
+
 ## Measurements
 
 Harness: `apps/figcraft-web/spike/`.
@@ -301,7 +367,7 @@ Raw results from the final runs are summarised below. Latencies are host-page ro
 ### Bundle
 
 - `figcraft-web-<hash>_bg.wasm` is 22,360,389 bytes (21.3 MiB). The JS glue is 167,591 bytes.
-- This was built without `craft-fonts`.
+- This was built without `craft-fonts`. With Inter embedded the wasm is 24,042,866 bytes (see "Fonts (F7)").
 
 ### Out-of-tree `Backend` (A3)
 
@@ -323,7 +389,7 @@ passes 2 tests:
 | Same two thresholds in WKWebView | Not measured on this machine | **OPEN (gating)** |
 | Same in WebKitGTK | Not measured on this machine | Recorded, not gating |
 | 500-node drag < 100 ms per frame | Frame work p95 72 ms, max 76 ms | **GO**, with a thin margin (headless, one machine) |
-| Bundle < 24 MiB | 21.3 MiB without `craft-fonts` | **GO**, 2.7 MiB headroom. Embedding `craft-fonts` is unmeasured and could eat it |
+| Bundle < 24 MiB | 21.3 MiB without `craft-fonts`; 22.9 MiB (24,042,866 B) with Inter embedded | **GO**, 1.07 MiB headroom with fonts ("Fonts (F7)") |
 | `Backend` implementable out of tree | Compiles, 2 tests pass | **GO** |
 
 **Overall.** GO for E-1 on Chromium / WebView2, with the hidden mount as offscreen 1×1 (never
