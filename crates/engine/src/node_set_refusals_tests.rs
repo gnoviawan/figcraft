@@ -1,6 +1,6 @@
 //! `node.set` doesn't store what can't apply: auto layout keys go only to layers that can have auto
 //! layout (the others are named in `warnings`, and with none of them the call is refused), and a
-//! `fontStyle` the family lacks says which face draws instead.
+//! font family that isn't installed, or a `fontStyle` the family lacks, says which face draws instead.
 
 use serde_json::{Value, json};
 
@@ -79,9 +79,44 @@ fn a_font_style_draws_in_the_nearest_face_and_says_so_when_it_differs() {
     let w = out["warnings"][0].as_str().unwrap();
     assert!(w.contains(&family) && w.contains("`Black`") && w.contains("nearest"), "{w}");
     assert_eq!(s.doc().unwrap().node(t).unwrap().kind.text().unwrap().spans()[0].2.font_style, "Black");
-    // A family that isn't installed keeps any style name without a word (files from elsewhere name theirs).
-    let out = ex(&mut s, "node.set", json!({"ids": [t], "props": {"fontFamily": "No Such Family 7f3a", "fontStyle": "Hairline"}}));
-    assert!(out.get("warnings").is_none(), "{out}");
+    // A style the family lacks says so on a new layer too.
+    let out = ex(&mut s, "node.create", json!({"type": "text", "text": "Hi", "props": {"fontFamily": family, "fontStyle": "Black"}}));
+    let w = out["warnings"][0].as_str().unwrap();
+    assert!(w.contains(&family) && w.contains("`Black`") && w.contains("nearest"), "{w}");
+}
+
+#[test]
+fn a_family_that_is_not_installed_is_kept_and_says_so() {
+    let mut s = Session::new();
+    let missing = |out: &Value, family: &str| {
+        let w = out["warnings"].as_array().unwrap_or_else(|| panic!("no warnings: {out}"));
+        assert!(w.len() == 1 && w[0].as_str().is_some_and(|w| w.contains(family) && w.contains("not installed")), "{out}");
+    };
+    let out = ex(
+        &mut s,
+        "node.create",
+        json!({"type": "text", "text": "NoSuchFont family", "props": {"fontFamily": "NoSuchFontXYZ", "fontStyle": "Black Italic", "fontSize": 28}}),
+    );
+    missing(&out, "NoSuchFontXYZ");
+    let t = id(&out["id"]);
+    let span = s.doc().unwrap().node(t).unwrap().kind.text().unwrap().spans()[0].2.clone();
+    assert_eq!((span.font_family.as_str(), span.font_style.as_str()), ("NoSuchFontXYZ", "Black Italic"));
+
+    let plain = id(&ex(&mut s, "node.create", json!({"type": "text", "text": "Hi"}))["id"]);
+    missing(&ex(&mut s, "node.set", json!({"ids": [plain], "props": {"fontFamily": "No Such Family 7f3a"}})), "No Such Family 7f3a");
+    missing(&ex(&mut s, "node.set", json!({"ids": [t], "props": {"fontStyle": "Bold"}})), "NoSuchFontXYZ");
+    assert!(ex(&mut s, "node.set", json!({"ids": [t], "props": {"fontSize": 12}})).get("warnings").is_none());
+
+    let steps = ex(
+        &mut s,
+        "command.batch",
+        json!({"commands": [
+            {"command": "node.create", "params": {"type": "text", "text": "a", "props": {"fontFamily": "Nope Sans"}}},
+            {"command": "node.set", "params": {"ids": [plain], "props": {"fontFamily": "Nope Serif"}}},
+        ]}),
+    );
+    missing(&steps[0], "Nope Sans");
+    missing(&steps[1], "Nope Serif");
 }
 
 #[test]

@@ -219,3 +219,12 @@ fn set_properties_passes_on_what_it_skipped() {
     assert!(c.ok("set_properties", json!({"ids": [f], "props": {"gap": 4}})).get("warnings").is_none());
     assert!(c.err("set_properties", json!({"ids": [t], "props": {"gap": 4}})).contains("auto layout"));
 }
+
+#[test]
+fn create_node_passes_on_a_missing_font() {
+    let mut c = Client::new();
+    let r = c.ok("create_node", json!({"type": "text", "text": "Hi", "props": {"fontFamily": "NoSuchFontXYZ", "fontStyle": "Black Italic"}}));
+    assert!(r["warnings"][0].as_str().is_some_and(|w| w.contains("NoSuchFontXYZ") && w.contains("not installed")), "{r}");
+    assert!(r["node"].is_object(), "{r}");
+    assert!(c.ok("create_node", json!({"type": "text", "text": "Hi"})).get("warnings").is_none());
+}
