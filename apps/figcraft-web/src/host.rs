@@ -55,6 +55,7 @@ enum HostMethod {
     GuestCursor,
     GuestFlash,
     GuestHide,
+    File,
 }
 
 const HOST_METHODS: &[(&str, HostMethod)] = &[
@@ -69,6 +70,7 @@ const HOST_METHODS: &[(&str, HostMethod)] = &[
     ("host.guestCursor", HostMethod::GuestCursor),
     ("host.guestFlash", HostMethod::GuestFlash),
     ("host.guestHide", HostMethod::GuestHide),
+    ("host.file", HostMethod::File),
 ];
 
 /// Control methods that act on the session alone: answered at once, outside any frame.
@@ -297,7 +299,39 @@ impl Host {
                 guests.hide(guests.now(), id);
                 Ok(json!({}))
             }
+            HostMethod::File => {
+                let name = text(p, "name")?.to_string();
+                if name.is_empty() {
+                    return Err(engine_error("`name` must not be empty"));
+                }
+                let (path, location) = (optional_text(p, "path")?, optional_text(p, "location")?);
+                let content_version = self.content_version(&app.session);
+                on_the_document_itself(&mut app.session, |s| {
+                    let ds = s.ds_mut().map_err(|e| engine_error(e.to_string()))?;
+                    ds.path = path;
+                    if ds.doc.name != name {
+                        let clean = !ds.is_dirty();
+                        ds.doc_mut().name = name;
+                        if clean {
+                            ds.mark_saved();
+                        }
+                    }
+                    Ok(())
+                })?;
+                // The host's file name is not an edit: the renamed document keeps the version.
+                self.seen = app.session.ds().ok().map(|ds| Seen { uid: ds.uid, doc: ds.document_itself().clone() });
+                app.ui.host_location = location;
+                Ok(json!({"contentVersion": content_version}))
+            }
         }
+    }
+}
+
+fn optional_text(p: &Value, key: &str) -> Result<Option<String>, HostError> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(engine_error(format!("`{key}` must be text or null"))),
     }
 }
 
