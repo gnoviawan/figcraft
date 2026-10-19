@@ -315,6 +315,48 @@ fn layout_mut<'a>(cmd: &str, k: &str, n: &'a mut Node) -> Result<&'a mut AutoLay
     Ok(ensure_layout(n))
 }
 
+/// After `props` set a `fontFamily` or `fontStyle`, the text layers among `ids` whose font doesn't
+/// draw as named, as `warnings`: a family that isn't installed draws in the default face, and a
+/// style the family lacks in its nearest face when that has another weight or slant. Styles a
+/// family has or names as an instance (spelled any way: "SemiBold", "Semi Bold") say nothing.
+pub fn font_warnings(doc: &Document, ids: &[NodeId], props: &Map<String, Value>) -> Vec<String> {
+    if !props.contains_key("fontFamily") && !props.contains_key("fontStyle") {
+        return Vec::new();
+    }
+    let fonts: std::collections::BTreeSet<(String, String)> = ids
+        .iter()
+        .filter_map(|i| doc.node(*i)?.kind.text())
+        .flat_map(|t| t.spans().into_iter().map(|(_, _, st)| (st.font_family.clone(), st.font_style.clone())).collect::<Vec<_>>())
+        .collect();
+    let mut missing = std::collections::BTreeSet::new();
+    fonts
+        .into_iter()
+        .filter_map(|(family, style)| {
+            let styles = figcraft_text::family_styles(&family);
+            if styles.is_empty() {
+                if !missing.insert(family.clone()) {
+                    return None;
+                }
+                return Some(match figcraft_text::find_face(&family, &style) {
+                    Some(face) => format!("{family} is not installed: it draws in {} {}, the default font", face.family, face.style),
+                    None => format!("{family} is not installed"),
+                });
+            }
+            let norm = |s: &str| s.to_lowercase().replace([' ', '-', '_'], "");
+            if styles.iter().any(|x| norm(x) == norm(&style)) {
+                return None;
+            }
+            let (want_w, want_i) = (i32::from(style_weight(&style)), style.to_lowercase().contains("italic"));
+            let face = figcraft_text::find_face(&family, &style).filter(|f| f.family.eq_ignore_ascii_case(&family))?;
+            let w = face.axis("wght").map_or(i32::from(face.weight), |a| a.clamp(f64::from(want_w)).round() as i32);
+            if face.instance(&style).is_some() || (w == want_w && face.italic == want_i) {
+                return None;
+            }
+            Some(format!("{family} has no `{style}` style: it draws in {}, the nearest (it has: {})", face.style, styles.join(", ")))
+        })
+        .collect()
+}
+
 /// Apply a property map to one node. `x`/`y` are relative to the parent.
 pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Value>) -> Result<()> {
     let mut unknown = Vec::new();
