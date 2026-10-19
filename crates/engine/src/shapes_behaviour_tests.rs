@@ -173,8 +173,10 @@ fn corner_radius_follows_the_documented_rules() {
         (200.0, 100.0, json!(20), 20.0, "a radius rounds the corners"),
         (200.0, 100.0, json!(80), 50.0, "silent: a radius larger than half the short side stops there, so corners never overlap (pinned)"),
         (200.0, 100.0, json!([10, 20, 30, 40]), 10.0, "a rectangle's corners can each have their own radius"),
-        (200.0, 100.0, json!(-5), 0.0, "a negative radius is none"),
     ];
+    let mut s = Session::new();
+    let id = create(&mut s, "shape.rectangle", json!({"x": 0, "y": 0, "width": 200, "height": 100}));
+    assert!(s.execute("node.set", &json!({"ids": [id], "props": {"cornerRadius": -5}})).is_err(), "a negative radius is refused");
     for (w, h, radius, want, why) in rows {
         let mut s = Session::new();
         let id = create(&mut s, "shape.rectangle", json!({"x": 0, "y": 0, "width": w, "height": h}));
