@@ -102,9 +102,14 @@ pub fn write_doc(doc: &Document, page: NodeId, out: &str) -> CliResult<()> {
             let v = figcraft_format::to_json(doc).map_err(|e| CliError::Failed(e.to_string()))?;
             serde_json::to_vec_pretty(&v).map_err(|e| CliError::Failed(e.to_string()))?
         }
-        "svg" => figcraft_svg::try_export_svg(&doc.in_srgb(), &children(doc, page), &Default::default())
-            .map_err(|e| CliError::Failed(e.to_string()))?
-            .into_bytes(),
+        "svg" => {
+            let exported = figcraft_svg::try_export_svg(&doc.in_srgb(), &children(doc, page), &Default::default())
+                .map_err(|e| CliError::Failed(e.to_string()))?;
+            for w in exported.warnings {
+                eprintln!("note: {w}");
+            }
+            exported.svg.into_bytes()
+        }
         "png" | "jpg" | "jpeg" | "webp" => encode(doc, &render_page(doc, page, 1.0)?, &e)?,
         "pdf" => page_pdf(doc, page, &PrintSettings::default())?,
         "fig" => fig_bytes(doc)?,

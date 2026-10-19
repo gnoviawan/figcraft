@@ -1,8 +1,9 @@
 //! SVG export and import.
 //!
 //! Export writes one `<svg>` sized to the exported nodes' bounds. Shapes become `<path>`s with
-//! their fills (solid, linear/radial gradients; angular and diamond fall back to their first
-//! colour... or a raster pattern), strokes are written as filled outlines so Inside/Outside
+//! their fills (solid, linear/radial gradients; diamond gradients as two linear gradients in a
+//! pattern; angular gradients, which SVG has no primitive for, as a rendered image in a pattern,
+//! reported in [`SvgExport::warnings`]), strokes are written as filled outlines so Inside/Outside
 //! alignment survives exactly, text is outlined, images are embedded as data URIs, and shadows
 //! and blurs become SVG filters. Shadow spread offsets the outline like the renderer (the shape
 //! stroked twice the spread wide with mitred joins, cut away with a mask to shrink); inner shadows
@@ -25,6 +26,7 @@ use std::fmt::Write as _;
 use base64::Engine as _;
 use figcraft_color::{Color, GradientKind, Paint, PaintKind};
 use figcraft_doc::{Document, EffectKind, Node, NodeId, NodeKind, SPREAD_MITER_LIMIT, Shadow};
+use figcraft_geom::kurbo::Shape as _;
 use figcraft_geom::{Affine, BezPath, Rect};
 use figcraft_render::shadow::Outline;
 use figcraft_render::{Alone, ExportDepthError, MAX_EXPORT_DEPTH, Pixmap, View, backdrop, check_export_depth};
@@ -79,6 +81,8 @@ struct W<'a> {
     clip: Option<String>,
     /// `id` attributes written so far.
     used_ids: std::collections::BTreeSet<String>,
+    /// What the file could only approximate, one line each.
+    warnings: Vec<String>,
 }
 
 /// ` clip-path="url(#…)"` for a clip path id (else nothing).
@@ -150,6 +154,13 @@ fn blend_style(b: figcraft_color::BlendMode) -> String {
     }
 }
 
+/// The tile of a pattern painting local `area`: a unit bigger all round, so antialiased edges
+/// never sample the next tile.
+fn paint_tile(area: Rect) -> Option<Rect> {
+    let b = area.inflate(1.0, 1.0);
+    ([b.x0, b.y0, b.x1, b.y1].iter().all(|v| v.is_finite()) && b.width() > 0.0 && b.height() > 0.0).then_some(b)
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
@@ -164,8 +175,10 @@ impl W<'_> {
         format!("{prefix}{}", self.next)
     }
 
-    /// `fill="..." [fill-opacity]` for a paint on a w×h box; `None` when it paints nothing.
-    fn paint_attr(&mut self, p: &Paint, w: f64, h: f64) -> Option<String> {
+    /// `fill="..." [fill-opacity]` for a paint of layer `n` covering its local `area` (`xf`: local →
+    /// SVG); `None` when it paints nothing.
+    fn paint_attr(&mut self, p: &Paint, n: &Node, area: Rect, xf: Affine) -> Option<String> {
+        let (w, h) = (n.width, n.height);
         if !p.visible || p.opacity <= 0.0 {
             return None;
         }
@@ -177,19 +190,19 @@ impl W<'_> {
                 Some(format!("fill=\"{}\"{op}{blend}", hex(*color)))
             }
             PaintKind::Gradient(g) => {
-                let gid = self.id("paint");
-                let stops: String = g
-                    .sorted_stops()
-                    .iter()
-                    .map(|s| {
-                        let a = s.color.a * p.opacity;
-                        let op = if a < 0.999 { format!(" stop-opacity=\"{}\"", num(f64::from(a))) } else { String::new() };
-                        format!("<stop offset=\"{}\" stop-color=\"{}\"{op}/>", num(f64::from(s.position)), hex(s.color))
-                    })
-                    .collect();
+                let stop = |position: f32, c: Color| {
+                    let a = c.a * p.opacity;
+                    let op = if a < 0.999 { format!(" stop-opacity=\"{}\"", num(f64::from(a))) } else { String::new() };
+                    format!("<stop offset=\"{}\" stop-color=\"{}\"{op}/>", num(f64::from(position)), hex(c))
+                };
+                let sorted = g.sorted_stops();
                 let (f, t, k) = ((g.from.0 * w, g.from.1 * h), (g.to.0 * w, g.to.1 * h), (g.width.0 * w, g.width.1 * h));
-                match g.kind {
+                // The unit square's handles (from, to, width) in the box.
+                let m = Affine::new([t.0 - f.0, t.1 - f.1, k.0 - f.0, k.1 - f.1, f.0, f.1]);
+                let id = match g.kind {
                     GradientKind::Linear => {
+                        let gid = self.id("paint");
+                        let stops: String = sorted.iter().map(|s| stop(s.position, s.color)).collect();
                         let _ = write!(
                             self.defs,
                             "<linearGradient id=\"{gid}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" gradientUnits=\"userSpaceOnUse\">{stops}</linearGradient>",
@@ -198,18 +211,39 @@ impl W<'_> {
                             num(t.0),
                             num(t.1)
                         );
+                        Some(gid)
                     }
-                    _ => {
-                        // Unit circle mapped onto the handle ellipse.
-                        let m = Affine::new([t.0 - f.0, t.1 - f.1, k.0 - f.0, k.1 - f.1, f.0, f.1]);
+                    GradientKind::Radial => {
+                        let gid = self.id("paint");
+                        let stops: String = sorted.iter().map(|s| stop(s.position, s.color)).collect();
                         let _ = write!(
                             self.defs,
                             "<radialGradient id=\"{gid}\" cx=\"0\" cy=\"0\" r=\"1\" gradientUnits=\"userSpaceOnUse\" gradientTransform=\"{}\">{stops}</radialGradient>",
                             matrix(m)
                         );
+                        Some(gid)
                     }
-                }
-                Some(format!("fill=\"url(#{gid})\"{blend}"))
+                    GradientKind::Diamond => {
+                        // Along a line through the centre, t = |x + y| runs from 1 down to 0 and back:
+                        // the stops mirrored about the middle.
+                        let mirrored: String = sorted
+                            .iter()
+                            .rev()
+                            .map(|s| stop(0.5 - s.position / 2.0, s.color))
+                            .chain(sorted.iter().map(|s| stop(0.5 + s.position / 2.0, s.color)))
+                            .collect();
+                        let opaque = sorted.iter().all(|s| s.color.a * p.opacity >= 0.999);
+                        self.diamond_pattern(&mirrored, opaque, m, area)
+                    }
+                    GradientKind::Angular => {
+                        let pid = self.raster_pattern(p, n, area, xf);
+                        if pid.is_some() {
+                            self.warn(format!("`{}`: the angular gradient is an embedded image (SVG has no conic gradient)", n.name));
+                        }
+                        pid
+                    }
+                }?;
+                Some(format!("fill=\"url(#{id})\"{blend}"))
             }
             PaintKind::Image(img) => {
                 let data = self.doc.images.get(&img.image)?;
@@ -259,6 +293,70 @@ impl W<'_> {
                 Some(format!("fill=\"url(#{pid})\"{op}{blend}"))
             }
         }
+    }
+
+    fn warn(&mut self, w: String) {
+        if !self.warnings.contains(&w) {
+            self.warnings.push(w);
+        }
+    }
+
+    /// A pattern over local `area` painting a diamond gradient with handle frame `m` exactly:
+    /// |x| + |y| in the frame is |x + y| where x and y share a sign and |x - y| where they don't,
+    /// two linear gradients, each over its two quadrants. Both agree on the axes. Opaque, the
+    /// first covers everything under the second, so no seam shows where they meet; translucent,
+    /// it would show through, so each fills only its quadrants, unantialiased so they tile.
+    fn diamond_pattern(&mut self, mirrored_stops: &str, opaque: bool, m: Affine, area: Rect) -> Option<String> {
+        let det = m.determinant();
+        if !(det.is_finite() && det != 0.0) {
+            return None;
+        }
+        let b = paint_tile(area)?;
+        let inv = m.inverse();
+        let r = [(b.x0, b.y0), (b.x1, b.y0), (b.x1, b.y1), (b.x0, b.y1)]
+            .map(|c| inv * figcraft_geom::kurbo::Point::new(c.0, c.1))
+            .iter()
+            .fold(1.0_f64, |r, q| r.max(q.x.abs()).max(q.y.abs()))
+            + 1.0;
+        let r = num(r);
+        let (same, apart, pid) = (self.id("paint"), self.id("paint"), self.id("pattern"));
+        let (same_quadrants, crisp) = if opaque {
+            (format!("M-{r} -{r}H{r}V{r}H-{r}Z"), "")
+        } else {
+            (format!("M0 0H{r}V{r}H0ZM0 0H-{r}V-{r}H0Z"), " shape-rendering=\"crispEdges\"")
+        };
+        let _ = write!(
+            self.defs,
+            "<linearGradient id=\"{same}\" x1=\"-0.5\" y1=\"-0.5\" x2=\"0.5\" y2=\"0.5\" gradientUnits=\"userSpaceOnUse\">{mirrored_stops}</linearGradient>\
+             <linearGradient id=\"{apart}\" x1=\"-0.5\" y1=\"0.5\" x2=\"0.5\" y2=\"-0.5\" gradientUnits=\"userSpaceOnUse\">{mirrored_stops}</linearGradient>\
+             <pattern id=\"{pid}\" patternUnits=\"userSpaceOnUse\" width=\"{}\" height=\"{}\" patternTransform=\"translate({} {})\"><g transform=\"{}\">\
+             <path d=\"{same_quadrants}\" fill=\"url(#{same})\"{crisp}/><path d=\"M0 0H{r}V-{r}H0ZM0 0H-{r}V{r}H0Z\" fill=\"url(#{apart})\"{crisp}/></g></pattern>",
+            num(b.width()),
+            num(b.height()),
+            num(b.x0),
+            num(b.y0),
+            matrix(Affine::translate((-b.x0, -b.y0)) * m),
+        );
+        Some(pid)
+    }
+
+    /// A pattern over local `area` holding an image of `p` (on layer `n`), drawn by the renderer
+    /// at the export's raster resolution through `xf` (local → SVG).
+    fn raster_pattern(&mut self, p: &Paint, n: &Node, area: Rect, xf: Affine) -> Option<String> {
+        let b = paint_tile(area)?;
+        let s = xf.determinant().abs().sqrt();
+        let view = raster_view(b, RASTER_SCALE * if s.is_finite() && s > 0.0 { s } else { 1.0 })?;
+        let pix = figcraft_render::paint::area_pixmap(p, n.width, n.height, b, view.scale, self.doc)?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(figcraft_render::encode_png(&pix).ok()?);
+        let (tw, th) = (num(f64::from(pix.width()) / view.scale), num(f64::from(pix.height()) / view.scale));
+        let pid = self.id("pattern");
+        let _ = write!(
+            self.defs,
+            "<pattern id=\"{pid}\" patternUnits=\"userSpaceOnUse\" width=\"{tw}\" height=\"{th}\" patternTransform=\"translate({} {})\"><image width=\"{tw}\" height=\"{th}\" preserveAspectRatio=\"none\" href=\"data:image/png;base64,{b64}\"/></pattern>",
+            num(b.x0),
+            num(b.y0)
+        );
+        Some(pid)
     }
 
     /// One cell of pattern `pt` on a `w`×`h` box: the source's vectors at each tile, or (a source
@@ -346,7 +444,7 @@ impl W<'_> {
                         "{morph}<feOffset in=\"{src}\" dx=\"{}\" dy=\"{}\"/><feGaussianBlur stdDeviation=\"{}\"/><feColorMatrix type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\" result=\"s{i}\"/>{}",
                         num(s.offset.0),
                         num(s.offset.1),
-                        num(s.radius / 2.0),
+                        num(s.radius.max(0.0) / 2.0),
                         num(f64::from(s.color.r)),
                         num(f64::from(s.color.g)),
                         num(f64::from(s.color.b)),
@@ -424,7 +522,6 @@ impl W<'_> {
         {
             self.body.push_str(&img);
         }
-        let (w, h) = (n.width, n.height);
         let outline = match &n.kind {
             NodeKind::Group | NodeKind::Page { .. } => None,
             _ => figcraft_render::node_outline(self.doc, n),
@@ -438,7 +535,7 @@ impl W<'_> {
             // Character ranges with their own fills: one path per style, like the canvas.
             for (path, fills) in runs {
                 for p in fills {
-                    if let Some(a) = self.paint_attr(p, w, h) {
+                    if let Some(a) = self.paint_attr(p, n, path.bounding_box(), xf) {
                         let el = format!("<path transform=\"{}\" d=\"{}\" {a}/>", matrix(xf), path_d(path));
                         self.body.push_str(&clipped(&paint_clip, el));
                     }
@@ -449,7 +546,7 @@ impl W<'_> {
         {
             let fr = if *rule == figcraft_render::FillRule::EvenOdd { " fill-rule=\"evenodd\"" } else { "" };
             for p in &n.fills {
-                if let Some(a) = self.paint_attr(p, w, h) {
+                if let Some(a) = self.paint_attr(p, n, path.bounding_box(), xf) {
                     let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(path));
                     self.body.push_str(&clipped(&paint_clip, el));
                 }
@@ -534,7 +631,7 @@ impl W<'_> {
                 let even = n.stroke.sides.is_some() || (n.stroke.dashes.is_empty() && closed && n.stroke.align != figcraft_doc::StrokeAlign::Center);
                 let fr = if even { " fill-rule=\"evenodd\"" } else { "" };
                 for p in &n.strokes {
-                    if let Some(a) = self.paint_attr(p, w, h) {
+                    if let Some(a) = self.paint_attr(p, n, area.bounding_box(), xf) {
                         let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(&area));
                         self.body.push_str(&clipped(&paint_clip, el));
                     }
@@ -563,7 +660,9 @@ impl W<'_> {
             return None;
         }
         let st = &t.style;
-        let fill = n.fills.iter().find_map(|p| self.paint_attr(p, n.width, n.height)).unwrap_or_else(|| "fill=\"none\"".into());
+        // Glyphs may reach past the box.
+        let area = figcraft_render::node_outline(self.doc, n).map_or(n.local_rect(), |(o, _)| o.bounding_box().union(n.local_rect()));
+        let fill = n.fills.iter().find_map(|p| self.paint_attr(p, n, area, xf)).unwrap_or_else(|| "fill=\"none\"".into());
         let chars: Vec<char> = t.characters.chars().collect();
         let mut spans = String::new();
         let mut gxf = xf;
@@ -589,7 +688,7 @@ impl W<'_> {
                         let text = st.case.apply(text.trim_end_matches(['\n', '\r']));
                         let own = match layout.styles.get(style).and_then(|s| s.fills.as_ref()) {
                             Some(fills) => {
-                                let a = fills.iter().find_map(|p| self.paint_attr(p, n.width, n.height)).unwrap_or_else(|| "fill=\"none\"".into());
+                                let a = fills.iter().find_map(|p| self.paint_attr(p, n, area, xf)).unwrap_or_else(|| "fill=\"none\"".into());
                                 format!(" {a}")
                             }
                             None => String::new(),
@@ -688,9 +787,12 @@ impl W<'_> {
         } else {
             format!(" stroke-dasharray=\"{}\"", k.dashes.iter().map(|d| num(*d)).collect::<Vec<_>>().join(" "))
         };
+        // Mitred corners reach furthest past the path: half the weight times the miter limit.
+        let reach = w / 2.0 * k.miter_limit.max(1.0);
+        let area = path.bounding_box().inflate(reach, reach);
         let mut out = String::new();
         for p in &n.strokes {
-            if let Some(a) = self.paint_attr(p, n.width, n.height) {
+            if let Some(a) = self.paint_attr(p, n, area, xf) {
                 let a = a.replace("fill-opacity=", "stroke-opacity=").replacen("fill=", "stroke=", 1);
                 let _ = write!(
                     out,
@@ -979,12 +1081,20 @@ fn sniff_mime(b: &[u8]) -> &'static str {
 /// Export `ids` (in z-order) as one SVG document covering their export bounds.
 /// Returns `None` for an empty or over-depth export. Use [`try_export_svg`] for the reason.
 pub fn export_svg(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Option<String> {
-    try_export_svg(doc, ids, opts).ok()
+    try_export_svg(doc, ids, opts).ok().map(|e| e.svg)
+}
+
+/// An exported SVG document and what it could only approximate (paints SVG has no primitive for,
+/// embedded as images), one warning per layer and kind.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SvgExport {
+    pub svg: String,
+    pub warnings: Vec<String>,
 }
 
 /// Like [`export_svg`], with an actionable error when the visible subtree is too deep. No partial
 /// SVG is returned; the depth limit is relative to each exported root, not the document's page.
-pub fn try_export_svg(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Result<String, SvgError> {
+pub fn try_export_svg(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Result<SvgExport, SvgError> {
     check_export_depth(doc, ids)?;
     let bounds: Rect = match opts.bounds {
         Some(b) if [b.x0, b.y0, b.x1, b.y1].iter().all(|v| v.is_finite()) => b,
@@ -1002,6 +1112,7 @@ pub fn try_export_svg(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Resu
         mask: None,
         clip: None,
         used_ids: Default::default(),
+        warnings: Vec::new(),
     };
     for id in ids {
         let parent_xf = doc.node(*id).and_then(|n| n.parent).map(|p| doc.world_transform(p)).unwrap_or(Affine::IDENTITY);
@@ -1009,7 +1120,7 @@ pub fn try_export_svg(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Resu
     }
     let (bw, bh) = (bounds.width().max(0.0), bounds.height().max(0.0));
     let defs = if w.defs.is_empty() { String::new() } else { format!("<defs>{}</defs>", w.defs) };
-    Ok(format!(
+    let svg = format!(
         "<svg width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\">{}{}</svg>\n",
         num(bw),
         num(bh),
@@ -1017,7 +1128,8 @@ pub fn try_export_svg(doc: &Document, ids: &[NodeId], opts: &SvgOptions) -> Resu
         num(bh),
         w.body,
         defs
-    ))
+    );
+    Ok(SvgExport { svg, warnings: w.warnings })
 }
 
 /// Text layer `n`'s glyph outlines grouped by style, each with the fills it paints in (its own, else

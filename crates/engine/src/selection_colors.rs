@@ -187,7 +187,7 @@ fn unbind_changed(n: &mut figcraft_doc::Node, t: &PaintTarget, old: &Paint, new:
 fn set_paint(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "selection.setPaint";
     let targets = checked_targets(s, p, CMD)?;
-    let paint = get(p, "paint").and_then(paint_of).ok_or_else(|| bad(CMD, "`paint` must be a paint"))?;
+    let paint = paint_of(get(p, "paint").ok_or_else(|| bad(CMD, "`paint` must be a paint"))?).map_err(|e| bad(CMD, format!("`paint`: {e}")))?;
     for target in &targets {
         let mut paints = target.paints(s.doc()?).ok_or_else(|| bad(CMD, "invalid target"))?;
         let Some(slot) = paints.get_mut(target.index) else { return Err(bad(CMD, "invalid paint index")) };

@@ -164,6 +164,21 @@ pub fn prepare_at(paint: &Paint, w: f64, h: f64, scale: f64, doc: &Document, tim
     }
 }
 
+/// `paint` on a `w`×`h` box drawn over the local `area` at `k` pixels per unit: how vector formats
+/// embed a paint they have no primitive for. `None` when it paints nothing.
+pub fn area_pixmap(paint: &Paint, w: f64, h: f64, area: figcraft_geom::Rect, k: f64, doc: &Document) -> Option<Pixmap> {
+    let finite = [area.x0, area.y0, area.x1, area.y1, k].iter().all(|v| v.is_finite());
+    if !(finite && area.width() > 0.0 && area.height() > 0.0 && k > 0.0) {
+        return None;
+    }
+    let prep = prepare(paint, w, h, k, doc)?;
+    let mut pix = Pixmap::new((area.width() * k).ceil().max(1.0) as u32, (area.height() * k).ceil().max(1.0) as u32)?;
+    let shader = tiny_skia::Paint { shader: prep.shader(), anti_alias: false, ..Default::default() };
+    let rect = tiny_skia::Rect::from_xywh(area.x0 as f32, area.y0 as f32, area.width() as f32, area.height() as f32)?;
+    pix.fill_rect(rect, &shader, Transform::from_row(k as f32, 0.0, 0.0, k as f32, (-area.x0 * k) as f32, (-area.y0 * k) as f32), None);
+    Some(pix)
+}
+
 /// Whether an image paint covers its whole `w` × `h` box: Fill always, Crop when its frame does.
 fn covers_box(img: &ImagePaint, iw: f64, ih: f64, w: f64, h: f64) -> bool {
     match img.scale_mode {

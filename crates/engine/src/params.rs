@@ -1,8 +1,8 @@
 //! Parameter parsing helpers shared by commands (lenient: agents send numbers as strings, ids as
 //! "12" or "0:12", colours as hex or CSS).
 
-use figcraft_color::{BlendMode, Color, Paint};
-use figcraft_doc::NodeId;
+use figcraft_color::{BlendMode, Color, Paint, PaintKind};
+use figcraft_doc::{Effect, EffectKind, NodeId};
 use serde_json::{Value, json};
 
 use crate::{EngineError, Result, Session, bad};
@@ -247,24 +247,78 @@ fn normalize_paintish(v: &mut Value, depth: usize) {
     }
 }
 
+/// Why a paint from JSON was refused.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PaintError {
+    /// Not a colour or a paint object.
+    NotAPaint,
+    /// A paint, but one commands don't set (the reason). Files can hold these; they draw with the
+    /// stops clamped, so only commands refuse them.
+    Invalid(String),
+}
+
+impl std::fmt::Display for PaintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PaintError::NotAPaint => f.write_str("not a paint or colour"),
+            PaintError::Invalid(why) => f.write_str(why),
+        }
+    }
+}
+
 /// A paint from JSON: a colour string/object (solid), a full paint object or its shorthand
-/// ([`normalize_paint`]).
-pub fn paint_of(v: &Value) -> Option<Paint> {
+/// ([`normalize_paint`]). Gradients need two stops or more, at positions in 0..1.
+pub fn paint_of(v: &Value) -> std::result::Result<Paint, PaintError> {
     if let Some(c) = color_of(v) {
-        return Some(Paint::solid(c));
+        return Ok(Paint::solid(c));
     }
     let mut v = v.clone();
     normalize_paint(&mut v);
-    let mut p: Paint = serde_json::from_value(v).ok()?;
+    let mut p: Paint = serde_json::from_value(v).map_err(|_| PaintError::NotAPaint)?;
+    if let PaintKind::Gradient(g) = &p.kind {
+        if g.stops.len() < 2 {
+            return Err(PaintError::Invalid(format!("a gradient needs at least two stops (got {})", g.stops.len())));
+        }
+        if let Some((i, s)) = g.stops.iter().enumerate().find(|(_, s)| !(0.0..=1.0).contains(&s.position)) {
+            return Err(PaintError::Invalid(format!("stop {i} has position {}, outside 0..1", s.position)));
+        }
+    }
     p.opacity = if p.opacity.is_finite() { p.opacity.clamp(0.0, 1.0) } else { 1.0 };
-    Some(p)
+    Ok(p)
 }
 
-pub fn paints_of(v: &Value) -> Option<Vec<Paint>> {
+/// One paint or a list of them, for parameter `key` (named in the error, with the paint's index).
+pub fn paints_of(v: &Value, key: &str) -> std::result::Result<Vec<Paint>, String> {
+    let why = |at: String, e: PaintError| match e {
+        PaintError::NotAPaint => format!("`{key}` must be paints or colours"),
+        PaintError::Invalid(why) => format!("`{key}`{at}: {why}"),
+    };
     match v {
-        Value::Array(a) => a.iter().map(paint_of).collect(),
-        other => paint_of(other).map(|p| vec![p]),
+        Value::Array(a) => a.iter().enumerate().map(|(i, x)| paint_of(x).map_err(|e| why(format!("[{i}]"), e))).collect(),
+        other => paint_of(other).map(|p| vec![p]).map_err(|e| why(String::new(), e)),
     }
+}
+
+/// Refuse what commands don't set on an effect: a negative shadow or blur radius (files can hold
+/// one; it draws like 0).
+pub fn check_effect(e: &Effect) -> std::result::Result<(), String> {
+    let radii: &[(&str, f64)] = match &e.kind {
+        EffectKind::DropShadow(s) | EffectKind::InnerShadow(s) => &[("radius", s.radius)],
+        EffectKind::LayerBlur(b) | EffectKind::BackgroundBlur(b) => &[("radius", b.radius), ("startRadius", b.start_radius)],
+        _ => &[],
+    };
+    match radii.iter().find(|(_, r)| *r < 0.0) {
+        Some((k, _)) => Err(format!("`{k}` can't be negative")),
+        None => Ok(()),
+    }
+}
+
+/// An effect list from JSON for parameter `key` (named in the error, with the effect's index),
+/// each passing [`check_effect`].
+pub fn effects_of(v: &Value, key: &str) -> std::result::Result<Vec<Effect>, String> {
+    let effects: Vec<Effect> = serde_json::from_value(v.clone()).map_err(|e| format!("`{key}`: {e}"))?;
+    effects.iter().enumerate().try_for_each(|(i, e)| check_effect(e).map_err(|why| format!("`{key}`[{i}]: {why}")))?;
+    Ok(effects)
 }
 
 pub fn blend(p: &Value, key: &str) -> Option<BlendMode> {

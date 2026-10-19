@@ -103,5 +103,5 @@ fn junk_is_still_refused() {
     for _ in 0..200 {
         deep = json!({"type": "linearGradient", "stops": [{"position": 0, "color": deep}]});
     }
-    assert!(paint_of(&deep).is_none());
+    assert!(paint_of(&deep).is_err());
 }

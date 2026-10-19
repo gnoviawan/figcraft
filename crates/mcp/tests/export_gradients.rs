@@ -64,7 +64,8 @@ fn gradients_need_two_stops_inside_zero_to_one() {
         assert!(e.contains("`fills`") && e.contains("two stops"), "{e}");
     }
     for pos in [1.5, -1.0] {
-        let e = set(&mut c, json!([{"type": "radialGradient", "stops": [{"position": 0, "color": "#FF0000"}, {"position": pos, "color": "#0000FF"}]}]));
+        let e =
+            set(&mut c, json!([{"type": "radialGradient", "stops": [{"position": 0, "color": "#FF0000"}, {"position": pos, "color": "#0000FF"}]}]));
         assert!(e.contains("`fills`") && e.contains("position") && e.contains(&pos.to_string()), "{e}");
     }
     let e = c.err("set_properties", json!({"ids": [r], "props": {"strokes": ["#000000", {"type": "linearGradient", "stops": []}]}}));
@@ -88,4 +89,18 @@ fn shadow_and_blur_radius_cannot_be_negative() {
     let e = c.err("run_command", json!({"command": "effect.add", "params": {"ids": [r], "effect": {"type": "dropShadow", "radius": -1}}}));
     assert!(e.contains("radius"), "{e}");
     c.ok("set_properties", json!({"ids": [r], "props": {"effects": [{"type": "dropShadow", "radius": 0}]}}));
+}
+
+#[test]
+fn paint_opacity_is_zero_to_one_or_a_spelled_out_percentage() {
+    let mut c = Client::new();
+    let r = c.create(json!({"type": "rectangle", "width": 100, "height": 100, "props": {"fill": "#FF0000"}}));
+    for command in ["fill.set", "stroke.set"] {
+        let e = c.err("run_command", json!({"command": command, "params": {"ids": [r], "opacity": 80}}));
+        assert!(e.contains("`opacity`"), "{e}");
+    }
+    c.run("fill.set", json!({"ids": [r], "opacity": "80%"}));
+    assert!((c.node(&r)["fills"][0]["opacity"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+    c.run("fill.set", json!({"ids": [r], "opacity": 0.25}));
+    assert!((c.node(&r)["fills"][0]["opacity"].as_f64().unwrap() - 0.25).abs() < 1e-6);
 }

@@ -92,10 +92,14 @@ fn hostile_progressive_values_are_capped_and_render() {
     let mut s = Session::new();
     let r = rect(&mut s);
     for effect in [
-        json!({"type": "layerBlur", "radius": 1e308, "blurType": PROGRESSIVE, "startRadius": -1e308, "startOffset": [1e308, -1e308], "endOffset": [0, 0]}),
-        json!({"type": "backgroundBlur", "radius": -5, "blurType": PROGRESSIVE, "startRadius": 1e12, "startOffset": [0.5, 0.5], "endOffset": [0.5, 0.5]}),
+        json!({"type": "layerBlur", "radius": 1e308, "blurType": PROGRESSIVE, "startRadius": 0, "startOffset": [1e308, -1e308], "endOffset": [0, 0]}),
+        json!({"type": "backgroundBlur", "radius": 0, "blurType": PROGRESSIVE, "startRadius": 1e12, "startOffset": [0.5, 0.5], "endOffset": [0.5, 0.5]}),
     ] {
         s.execute("effect.add", &json!({"ids": [r], "effect": effect})).unwrap();
+    }
+    for (radius, start) in [(-5.0, 0.0), (1.0, -1e308)] {
+        let effect = json!({"type": "layerBlur", "radius": radius, "blurType": PROGRESSIVE, "startRadius": start});
+        assert!(s.execute("effect.add", &json!({"ids": [r], "effect": effect})).is_err(), "{radius} {start}");
     }
     let doc = s.doc().unwrap();
     for e in &doc.node(r).unwrap().effects {
