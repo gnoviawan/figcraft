@@ -116,7 +116,9 @@ pub fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
 /// failure can be found without trial and error (the `batch` tool promises "the error names the
 /// failing step"). `$step` reference errors already name their step this way, so they keep theirs.
 fn step_error(step: usize, cmd: &str, e: EngineError) -> EngineError {
-    if matches!(e, EngineError::BadParams { cmd, .. } if cmd == "command.batch") {
+    if let EngineError::BadParams { cmd: inner, .. } = &e
+        && inner.as_str() == "command.batch"
+    {
         return e;
     }
     EngineError::Other(format!("step {step} (`{cmd}`): {e}"))

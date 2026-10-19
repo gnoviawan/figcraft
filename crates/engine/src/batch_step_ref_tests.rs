@@ -123,10 +123,7 @@ fn a_failing_step_names_itself_in_the_error() {
         ]}),
     );
     let message = r.unwrap_err().to_string();
-    assert!(
-        message.contains("step 2 (`node.create`)") && message.contains("Fill needs an auto layout parent"),
-        "{message}"
-    );
+    assert!(message.contains("step 2 (`node.create`)") && message.contains("Fill needs an auto layout parent"), "{message}");
     // A step's own reference error keeps its step wording, not the step 2 prefix.
     let r = s.execute(
         "command.batch",
@@ -136,10 +133,7 @@ fn a_failing_step_names_itself_in_the_error() {
         ]}),
     );
     let message = r.unwrap_err().to_string();
-    assert!(
-        message.contains("step 1: `$step` 5 must be an earlier step") && !message.contains("step 1 (`node.set`)"),
-        "{message}"
-    );
+    assert!(message.contains("step 1: `$step` 5 must be an earlier step") && !message.contains("step 1 (`node.set`)"), "{message}");
     // A nested batch's inner failure names the inner step, then the outer one.
     let r = s.execute(
         "command.batch",
