@@ -1727,6 +1727,7 @@ dependencies = [
  "figcraft-doc",
  "figcraft-engine",
  "figcraft-format",
+ "figcraft-text",
  "figcraft-ui-egui",
  "js-sys",
  "log",

@@ -12,7 +12,7 @@ fn app() -> (FigApp, egui::Context, Host) {
 fn now(answer: Answer) -> Result<String, HostError> {
     match answer {
         Answer::Now(r) => r,
-        Answer::Later(_) => panic!("expected an answer now"),
+        Answer::Later(_) | Answer::FetchFonts(_) => panic!("expected an answer now"),
     }
 }
 
@@ -427,4 +427,56 @@ fn guest_calls_work_in_a_kiosk_and_while_the_canvas_is_hidden() {
         }
         assert_eq!(guests(&app).len(), 1, "the state updated without a frame");
     }
+}
+
+#[test]
+fn fallback_fonts_take_a_bounded_list_of_urls() {
+    let (mut app, ctx, mut host) = app();
+    let urls = json!({"urls": ["host-fonts/seguisym.ttf", "https://example.test/a.ttc"]}).to_string();
+    match host.call(&mut app, &ctx, "host.fallbackFonts", &urls, true) {
+        Answer::FetchFonts(u) => assert_eq!(u, ["host-fonts/seguisym.ttf", "https://example.test/a.ttc"], "fetched even while hidden"),
+        _ => panic!("expected the URLs to fetch"),
+    }
+    let too_many = json!({"urls": vec!["a.ttf"; 17]}).to_string();
+    for bad in ["{}", r#"{"urls":"a.ttf"}"#, r#"{"urls":["a.ttf", 3]}"#, r#"{"urls":[""]}"#, too_many.as_str()] {
+        let err = now(host.call(&mut app, &ctx, "host.fallbackFonts", bad, false)).unwrap_err();
+        assert_eq!(err.code, Code::EngineError, "{bad}");
+    }
+}
+
+/// A font file with dingbats the embedded Inter lacks, when this machine has one.
+fn symbol_font() -> Option<Vec<u8>> {
+    ["C:/Windows/Fonts/seguisym.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Apple Symbols.ttf"]
+        .iter()
+        .find_map(|p| std::fs::read(p).ok())
+}
+
+#[test]
+fn fallback_fonts_draw_what_the_text_font_lacks() {
+    let Some(font) = symbol_font() else { return };
+    let (mut app, ctx, mut host) = app();
+    let mut render = |text: &str| {
+        let made = ok(
+            &mut host,
+            &mut app,
+            &ctx,
+            "engine.execute",
+            json!({"command": "text.create", "params": {"text": text, "x": 0, "y": 0, "props": {"fontFamily": "Inter", "fontSize": 28}}}),
+        );
+        let id = made.get("id").cloned().unwrap();
+        b64(&ok(&mut host, &mut app, &ctx, "host.renderPng", json!({"ids": [id]})))
+    };
+    // U+0378 is unassigned, so no font draws it: its render is the NOGLYPH box.
+    let noglyph = render("\u{378}");
+    assert_eq!(render("\u{276F}"), noglyph, "❯ is a NOGLYPH box before");
+    let reply: Value = serde_json::from_str(&crate::host::add_fallback_fonts(vec![
+        ("host-fonts/symbols".into(), Ok(font)),
+        ("host-fonts/missing.ttf".into(), Err("HTTP 404".into())),
+        ("host-fonts/junk.ttf".into(), Ok(b"not a font".to_vec())),
+    ]))
+    .unwrap();
+    assert_eq!(reply["families"].as_array().map(Vec::len), Some(1), "{reply}");
+    assert_eq!(reply["failed"][0], json!({"url": "host-fonts/missing.ttf", "error": "HTTP 404"}));
+    assert_eq!(reply["failed"][1], json!({"url": "host-fonts/junk.ttf", "error": "not a font file"}));
+    assert_ne!(render("\u{276F}"), noglyph, "❯ comes from the fallback font");
 }

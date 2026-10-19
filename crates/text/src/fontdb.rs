@@ -427,6 +427,9 @@ const FALLBACK_FAMILIES: [&str; 18] = [
     "Segoe UI Symbol",
 ];
 
+/// Colour emoji families tried, in order, by [`FontDb::emoji_fallbacks`].
+const EMOJI_FAMILIES: [&str; 3] = ["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"];
+
 /// A system font file entry not yet loaded.
 #[derive(Clone, Debug)]
 struct Pending {
@@ -443,6 +446,9 @@ pub struct FontDb {
     /// System faces known by name but not loaded (lower-case family → entries).
     pending: BTreeMap<String, (String, Vec<Pending>)>,
     system_scanned: bool,
+    /// Families an embedding host handed over as fallbacks ([`FontDb::add_fallback_bytes`]), in
+    /// its order: lower-case keys, tried after the built-in lists.
+    host_fallbacks: Vec<String>,
 }
 
 static DB: OnceLock<RwLock<FontDb>> = OnceLock::new();
@@ -495,6 +501,30 @@ impl FontDb {
             Err(_) => 0,
         };
         (0..count).filter_map(|i| Face::from_bytes(FontBytes::Shared(shared.clone()), i, None, None)).map(|f| self.add(f)).collect()
+    }
+
+    /// [`add_bytes`](Self::add_bytes), and the faces' families become fallbacks for characters a
+    /// text's own font lacks, whatever they are called (a web build has no system fonts, so the
+    /// page embedding it supplies some).
+    pub fn add_fallback_bytes(&mut self, bytes: Vec<u8>) -> Vec<Arc<Face>> {
+        let added = self.add_bytes(bytes);
+        for face in &added {
+            let key = face.family.to_lowercase();
+            if !self.host_fallbacks.contains(&key) {
+                self.host_fallbacks.push(key);
+            }
+        }
+        added
+    }
+
+    /// The host's fallback families not already among `builtin`, colour ones (emoji) or not.
+    fn host_fallbacks_for(&self, style: &str, builtin: &[&str], color: bool) -> Vec<Arc<Face>> {
+        self.host_fallbacks
+            .iter()
+            .filter(|k| !builtin.iter().any(|b| b.eq_ignore_ascii_case(k)))
+            .filter_map(|k| self.best(k, style))
+            .filter(|f| f.has_color() == color)
+            .collect()
     }
 
     /// Family display names, sorted (loaded and known system families).
@@ -648,6 +678,7 @@ impl FontDb {
                 out.push(f);
             }
         }
+        out.extend(self.host_fallbacks_for(style, &FALLBACK_FAMILIES, false));
         out
     }
 
@@ -656,11 +687,12 @@ impl FontDb {
     /// and only texts that actually show emoji need them; each family reads one face.
     pub fn emoji_fallbacks(&mut self) -> Vec<Arc<Face>> {
         let mut out = Vec::new();
-        for fam in ["Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"] {
+        for fam in EMOJI_FAMILIES {
             if let Some(f) = self.find_one(fam, "Regular") {
                 out.push(f);
             }
         }
+        out.extend(self.host_fallbacks_for("Regular", &EMOJI_FAMILIES, true));
         out
     }
 
@@ -880,6 +912,18 @@ pub fn scan_system_fonts_on_demand() {
 /// Whether the system fonts were indexed ([`scan_system_fonts`] finished; always false on the web).
 pub fn system_fonts_scanned() -> bool {
     raw_db().read().unwrap_or_else(std::sync::PoisonError::into_inner).system_scanned
+}
+
+/// Add a font file to the global db as a fallback ([`FontDb::add_fallback_bytes`]) and forget the
+/// layouts made without it. Returns the families it added (none when the bytes are not a font).
+pub fn add_fallback_font(bytes: Vec<u8>) -> Vec<String> {
+    let added = db().write().unwrap_or_else(std::sync::PoisonError::into_inner).add_fallback_bytes(bytes);
+    if !added.is_empty() {
+        crate::clear_layout_cache();
+    }
+    let mut families: Vec<String> = added.iter().map(|f| f.family.clone()).collect();
+    families.dedup();
+    families
 }
 
 /// The first of `families` (embedded or system) whose regular face draws `c`, for a UI toolkit
