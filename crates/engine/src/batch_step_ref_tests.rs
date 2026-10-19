@@ -110,3 +110,52 @@ fn a_nested_batch_refers_to_its_own_steps() {
     let rect = s.doc().unwrap().node(id(&inner[1])).unwrap().clone();
     assert_eq!(rect.parent, Some(id(&inner[0])), "in the nested batch's own first frame, not the outer one");
 }
+
+#[test]
+fn a_failing_step_names_itself_in_the_error() {
+    let mut s = Session::new();
+    let r = s.execute(
+        "command.batch",
+        &json!({"commands": [
+            {"command": "node.create", "params": {"type": "frame", "width": 100, "height": 100}},
+            {"command": "node.create", "params": {"type": "text", "text": "x", "parent": {"$step": 0}, "props": {"sizingH": "fill"}}},
+            {"command": "node.create", "params": {"type": "text", "text": "y", "props": {"sizingH": "fill"}}}
+        ]}),
+    );
+    let message = r.unwrap_err().to_string();
+    assert!(
+        message.contains("step 2 (`node.create`)") && message.contains("Fill needs an auto layout parent"),
+        "{message}"
+    );
+    // A step's own reference error keeps its step wording, not the step 2 prefix.
+    let r = s.execute(
+        "command.batch",
+        &json!({"commands": [
+            {"command": "node.create", "params": {"type": "frame", "width": 100, "height": 100}},
+            {"command": "node.set", "params": {"ids": [{"$step": 5}], "props": {"name": "x"}}}
+        ]}),
+    );
+    let message = r.unwrap_err().to_string();
+    assert!(
+        message.contains("step 1: `$step` 5 must be an earlier step") && !message.contains("step 1 (`node.set`)"),
+        "{message}"
+    );
+    // A nested batch's inner failure names the inner step, then the outer one.
+    let r = s.execute(
+        "command.batch",
+        &json!({"commands": [
+            {"command": "node.create", "params": {"type": "frame", "width": 100, "height": 100}},
+            {"command": "command.batch", "params": {"commands": [
+                {"command": "node.create", "params": {"type": "text", "text": "z", "props": {"sizingH": "fill"}}}
+            ]}}
+        ]}),
+    );
+    let message = r.unwrap_err().to_string();
+    assert!(
+        message.contains("step 0 (`node.create`): invalid parameters for `node.create`: Fill needs an auto layout parent")
+            && message.contains("step 1 (`command.batch`)"),
+        "{message}"
+    );
+    // The document rolled back.
+    assert_eq!(s.doc().unwrap().node(s.page().unwrap()).unwrap().children.len(), 0);
+}

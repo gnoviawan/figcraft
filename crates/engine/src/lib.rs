@@ -112,6 +112,16 @@ pub fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.to_string(), msg: msg.into() }
 }
 
+/// A failing batch step's error, prefixed with the step's index and command so a long batch's
+/// failure can be found without trial and error (the `batch` tool promises "the error names the
+/// failing step"). `$step` reference errors already name their step this way, so they keep theirs.
+fn step_error(step: usize, cmd: &str, e: EngineError) -> EngineError {
+    if matches!(e, EngineError::BadParams { cmd, .. } if cmd == "command.batch") {
+        return e;
+    }
+    EngineError::Other(format!("step {step} (`{cmd}`): {e}"))
+}
+
 /// Deepest params nesting `resolve_step_refs` walks before giving up.
 const STEP_REF_MAX_DEPTH: usize = 64;
 
@@ -1205,7 +1215,7 @@ impl Session {
     /// resolve `$step` the same way, inside its own [`Session::grouped`].
     pub fn batch_step(&mut self, results: &[Value], step: usize, cmd: &str, params: &Value) -> Result<Value> {
         let p = if cmd == "command.batch" { params.clone() } else { resolve_step_refs(params, results, step, 0)? };
-        self.execute(cmd, &p)
+        self.execute(cmd, &p).map_err(|e| step_error(step, cmd, e))
     }
 
     /// Run `f` as one undo step called `label`: the commands it executes push no steps of their
