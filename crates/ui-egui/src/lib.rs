@@ -27,15 +27,15 @@ pub mod font_preview;
 pub mod frame_labels;
 pub mod frame_presets;
 pub mod frame_stats;
-pub mod guides;
 pub mod guests;
+pub mod guides;
 pub mod handles;
 pub mod home;
 pub mod home_recents;
 pub mod i18n;
 pub mod icons;
-pub mod kiosk;
 pub mod import_report;
+pub mod kiosk;
 pub mod layers;
 pub mod layout_panel;
 pub mod list_drag;
@@ -112,9 +112,9 @@ mod gap_handle_tests;
 #[cfg(test)]
 mod gradient_shorthand_tests;
 #[cfg(test)]
-mod guide_release_tests;
-#[cfg(test)]
 mod guests_tests;
+#[cfg(test)]
+mod guide_release_tests;
 #[cfg(test)]
 mod home_recents_tests;
 #[cfg(test)]
