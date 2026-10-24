@@ -233,8 +233,12 @@ fn create_node_passes_on_a_missing_font() {
 fn set_properties_refuses_out_of_range_numbers_instead_of_rescaling_them() {
     let mut c = Client::new();
     let f = c.ok("create_node", json!({"type": "frame", "width": 400, "props": {"layout": "horizontal", "padding": 16}}))["id"].clone();
-    for (props, key) in [(json!({"opacity": 1.5}), "`opacity`"), (json!({"width": -50}), "`width`"), (json!({"cornerRadius": -10}), "`cornerRadius`")]
-    {
+    for (props, key) in [
+        (json!({"opacity": 1.5}), "`opacity`"),
+        (json!({"width": -50}), "`width`"),
+        (json!({"cornerRadius": -10}), "`cornerRadius`"),
+        (json!({"cornerRadius": ["50%", 0, 0, 0]}), "`cornerRadius`"),
+    ] {
         let e = c.err("set_properties", json!({"ids": [f], "props": props}));
         assert!(e.contains(key), "{props}: {e}");
     }

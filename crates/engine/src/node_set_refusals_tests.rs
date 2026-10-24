@@ -155,6 +155,10 @@ fn out_of_range_numbers_are_refused_naming_the_key_and_its_range() {
         (r, json!({"strokeWeight": -1}), "strokeWeight", "0 or more"),
         (r, json!({"strokeTopWeight": -2}), "strokeTopWeight", "0 or more"),
         (r, json!({"strokeSides": [1, -1, 1, 1]}), "strokeSides", "0 or more"),
+        (r, json!({"cornerRadius": "50%"}), "cornerRadius", "0 or more"),
+        (r, json!({"cornerRadius": ["50%", 0, 0, 0]}), "cornerRadius", "0 or more"),
+        (r, json!({"cornerRadius": ["10%"]}), "cornerRadius", "0 or more"),
+        (r, json!({"strokeSides": ["5%", 1, 1, 1]}), "strokeSides", "0 or more"),
     ];
     for (target, props, key, range) in cases {
         let before = s.doc().unwrap().node(target).unwrap().clone();
@@ -183,6 +187,9 @@ fn in_range_numbers_and_explicit_percentages_apply() {
     set(&mut s, json!({"cornerSmoothing": "60%", "cornerRadius": [0, 4, 8, 12], "strokeWeight": 0, "width": 0}));
     let n = s.doc().unwrap().node(r).unwrap();
     assert_eq!((n.corners.smoothing, n.corners.radii, n.stroke.weight, n.width), (0.6, [0.0, 4.0, 8.0, 12.0], 0.0, 0.0));
+    set(&mut s, json!({"cornerRadius": "6", "strokeSides": [2, "3"]}));
+    let n = s.doc().unwrap().node(r).unwrap();
+    assert_eq!((n.corners.radii, n.stroke.sides), ([6.0; 4], Some([2.0, 3.0, 2.0, 3.0])));
 }
 
 #[test]

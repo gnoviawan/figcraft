@@ -60,8 +60,8 @@ pub(crate) fn number_in_range(cmd: &str, k: &str, v: &Value) -> Result<f64> {
 /// [`number_in_range`] for `n or [a,b,c,d]` keys.
 fn four_in_range(cmd: &str, k: &str, v: &Value, help: &str) -> Result<[f64; 4]> {
     let r = four(v).ok_or_else(|| bad(cmd, help))?;
-    for x in r {
-        number_in_range(cmd, k, &json!(x))?;
+    for x in v.as_array().map_or(std::slice::from_ref(v), Vec::as_slice) {
+        number_in_range(cmd, k, x)?;
     }
     Ok(r)
 }
