@@ -66,6 +66,8 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
     payloads are in "Theme, locale and brand (E1-3)" below.
   - `host.describe` → `{tag, engineVersion}`. `tag` comes from the build-time `FIGCRAFT_HOST_TAG`
     and defaults to `dev`.
+  - `host.fallbackFonts {urls}` → `{families, failed: [{url, error}]}`. The editor fetches up to 16
+    font files and every face in them becomes a fallback. See "Glyph fallback (termul#1421)" below.
 - **`ui.*`.** These are queued on upstream's control queue, and the next frame's drain answers them.
   They return `CANVAS_HIDDEN` while `document.hidden` is true or the canvas is off screen
   (IntersectionObserver).
@@ -82,11 +84,12 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
   strong reference, so copy-on-write always gives an edited document a new pointer. Selection,
   viewport, and version or text previews do not bump it. A gesture in progress counts once, when
   committed.
-- **No engine change was needed.** No change was made in `crates/`.
+- **Engine changes.** The host API needed none. Glyph fallback added `add_fallback_font` to
+  `figcraft-text` (see "Glyph fallback (termul#1421)" below).
 
-Tests: `cargo test -p figcraft-web` has 10 host-API tests, covering ids above 2^53 surviving as
-text, contentVersion semantics, stale `markSaved`, a snapshot round trip, render and export, typed
-errors and ready gating.
+Tests: `cargo test -p figcraft-web` runs the host-API tests in `src/host_tests.rs`. They cover ids
+above 2^53 surviving as text, contentVersion semantics, stale `markSaved`, a snapshot round trip,
+render and export, typed errors, ready gating and `host.fallbackFonts`.
 
 ## Theme, locale and brand (E1-3)
 
@@ -317,6 +320,39 @@ canvas and in the Layers panel.
   families it does not embed, which can be dropped from Termul's copy.
 - Upstream's `NOTICE` and `ATTRIBUTION.md` already describe craft-fonts' fonts. The fork's brand
   knob leaves them alone.
+
+## Glyph fallback (termul#1421)
+
+The engine already falls back per character (grapheme cluster) over `FALLBACK_FAMILIES` and the
+colour emoji families. Desktop builds fill those lists from a system font scan. The wasm build
+has no system fonts and embeds only Inter, so every fallback lookup came back empty and Inter's
+NOGLYPH box was drawn instead.
+
+- **Options weighed.** Embedding a fallback in the wasm does not fit: about 1.07 MiB is left under
+  the 25,165,824 B gate, craft-fonts has no symbol or emoji font, and its CJK fonts are 8 to 16 MB
+  each. Lazily fetched craft-fonts files would cover CJK only (no symbols, no emoji) and add
+  16 MB or more to Termul's bundle. The host lending its own system fonts covers symbols, CJK and
+  emoji at no wasm cost, is what the desktop build already does, and redistributes nothing.
+- **What landed.** `host.fallbackFonts {urls}` fetches the files (relative URLs resolve against
+  the editor's page, so they ride the bundle's token path), adds every face as a fallback whatever
+  its family is called (`FontDb::add_fallback_bytes`, tried after the built-in lists; colour
+  faces join the emoji list), clears the layout cache and repaints. The reply waits for the
+  fetches, so a host that awaits it before `host.openDocument` gets a first render with the
+  fonts. A file that fails (HTTP error, not a font) is listed in `failed` and costs only its
+  characters.
+- **Size.** The wasm is 24,053,855 B (7,000 B more than `termul-v0.2.0`'s 24,046,855 B),
+  1,111,969 B under the gate.
+- **Proof.** `spike/glyph-fallback.mjs` in headless Edge renders the issue's text with
+  `host.renderPng`, and each character alone, and counts the renders equal to U+0378's (the
+  NOGLYPH box). `termul-v0.2.0`: 16 of 18 characters are boxes (`glyph-fallback-before.png`).
+  This build with Windows 10's Segoe UI Symbol, Microsoft YaHei, Malgun Gothic and Segoe UI Emoji
+  (37.7 MB of files) passed to `host.fallbackFonts`: 0 of 18, the four files load in 228 to
+  232 ms over loopback, and the emoji draws in colour (`glyph-fallback-after.png`,
+  `glyph-fallback-after-canvas.png`). The 18 characters are ❯ ✎ ◐ ▾ ✦ █ ◎ 中 文 日 本 語 😀 → ✓ plus
+  か カ 한.
+- **Not covered.** The editor's own UI text (the Layers panel's layer names) uses egui's fonts,
+  not the fallback list, and still shows boxes. Windows 11's Segoe UI Emoji was not measured
+  (only Windows 10's COLR v0 file was).
 
 ## Measurements
 
