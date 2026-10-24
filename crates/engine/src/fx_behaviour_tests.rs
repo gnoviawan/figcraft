@@ -58,7 +58,7 @@ fn blend_modes_and_effects_through_commands() {
     let mut s = Session::new();
     let r = rect(&mut s, None, (0.0, 0.0, 40.0, 40.0), "#CC6633");
     s.execute("fill.add", &json!({"ids": [r], "paint": "#66CCEE"})).unwrap();
-    s.execute("fill.set", &json!({"ids": [r], "index": 1, "blend": "plusDarker", "opacity": 50})).unwrap();
+    s.execute("fill.set", &json!({"ids": [r], "index": 1, "blend": "plusDarker", "opacity": "50%"})).unwrap();
     let n = s.doc().unwrap().node(r).unwrap();
     assert_eq!((n.fills[1].blend, n.fills[1].opacity), (BlendMode::PlusDarker, 0.5));
     // Inspecting the layer reports the paint's blend mode.
@@ -99,7 +99,7 @@ fn exports_isolate_normal_groups_and_hide_shadows_behind_their_layer() {
     // filter composites it "out" of an image of the layer's outline.
     let r = rect(&mut s, None, (200.0, 0.0, 40.0, 40.0), "#FF0000");
     set(&mut s, r, json!({"effects": [{"type": "dropShadow", "offset": [10, 0], "radius": 0, "spread": 0}]}));
-    s.execute("fill.set", &json!({"ids": [r], "opacity": 50})).unwrap();
+    s.execute("fill.set", &json!({"ids": [r], "opacity": "50%"})).unwrap();
     let hidden = svg(&s, &[r]);
     assert!(hidden.contains("result=\"cover\"") && hidden.contains("in2=\"cover\" operator=\"out\""), "{hidden}");
     // Shown behind transparent areas: no cut-out.

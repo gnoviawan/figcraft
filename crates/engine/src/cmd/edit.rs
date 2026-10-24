@@ -262,6 +262,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("effect.set", "Set effect", "{ids?, index, effect {..}}", true, |s, p| {
             let i = req_index("effect.set", p, "index")?;
             let e: Effect = parse("effect.set", p, "effect")?.ok_or_else(|| bad("effect.set", "`effect` required"))?;
+            check_effect(&e).map_err(|why| bad("effect.set", format!("`effect`: {why}")))?;
             for id in req_targets("effect.set", s, p)? {
                 let n = s.doc_mut()?.get_mut(id)?;
                 if let Some(slot) = n.effects.get_mut(i) {
@@ -1290,7 +1291,7 @@ fn paint_list(s: &mut Session, p: &Value, fills: bool, add: bool) -> Result<Valu
         let list = if fills { &mut n.fills } else { &mut n.strokes };
         if add {
             let paint = match get(p, "paint").or_else(|| get(p, "color")) {
-                Some(v) => paint_of(v).ok_or_else(|| bad(cmd, "invalid paint"))?,
+                Some(v) => paint_of(v).map_err(|e| bad(cmd, format!("`paint`: {e}")))?,
                 None if fills && frameish => figcraft_color::Paint::solid(figcraft_color::Color::WHITE),
                 None if fills => figcraft_color::Paint::solid(figcraft_color::Color::DEFAULT_SHAPE),
                 None => figcraft_color::Paint::solid(figcraft_color::Color::BLACK),
@@ -1310,10 +1311,11 @@ fn paint_set(s: &mut Session, p: &Value, fills: bool) -> Result<Value> {
     let ids = req_targets(cmd, s, p)?;
     let idx = opt_index(cmd, p, "index")?;
     let new_paint = match get(p, "paint") {
-        Some(v) => Some(paint_of(v).ok_or_else(|| bad(cmd, "invalid paint"))?),
+        Some(v) => Some(paint_of(v).map_err(|e| bad(cmd, format!("`paint`: {e}")))?),
         None => None,
     };
     let col = color(p, "color");
+    let opacity = get(p, "opacity").map(|v| super::props::number_in_range(cmd, "opacity", v)).transpose()?;
     let doc = s.doc_mut()?;
     for i in ids {
         let n = doc.get_mut(i)?;
@@ -1333,8 +1335,8 @@ fn paint_set(s: &mut Session, p: &Value, fills: bool) -> Result<Value> {
                 slot.opacity = c.a;
             }
         }
-        if let Some(o) = num(p, "opacity") {
-            slot.opacity = (if o > 1.0 { o / 100.0 } else { o }).clamp(0.0, 1.0) as f32;
+        if let Some(o) = opacity {
+            slot.opacity = o as f32;
         }
         if let Some(v) = boolean(p, "visible") {
             slot.visible = v;
@@ -1383,6 +1385,7 @@ fn effect_add(s: &mut Session, p: &Value) -> Result<Value> {
             Effect::of_type(&ty).ok_or_else(|| bad("effect.add", format!("unknown effect type `{ty}`")))?
         }
     };
+    check_effect(&e).map_err(|why| bad("effect.add", format!("`effect`: {why}")))?;
     for i in req_targets("effect.add", s, p)? {
         s.doc_mut()?.get_mut(i)?.effects.push(e.clone());
     }

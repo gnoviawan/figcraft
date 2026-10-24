@@ -459,12 +459,12 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 let b = v.as_str().and_then(figcraft_color::BlendMode::from_name).ok_or_else(|| bad(cmd, "unknown blend mode"))?;
                 doc.get_mut(id)?.blend = b;
             }
-            "fills" => doc.get_mut(id)?.fills = paints_of(v).ok_or_else(|| bad(cmd, "`fills` must be paints or colours"))?,
+            "fills" => doc.get_mut(id)?.fills = paints_of(v, "fills").map_err(|e| bad(cmd, e))?,
             "fill" => {
                 let c = color_of(v).ok_or_else(|| bad(cmd, "`fill` must be a colour"))?;
                 doc.get_mut(id)?.fills = vec![Paint::solid(c)];
             }
-            "strokes" => doc.get_mut(id)?.strokes = paints_of(v).ok_or_else(|| bad(cmd, "`strokes` must be paints or colours"))?,
+            "strokes" => doc.get_mut(id)?.strokes = paints_of(v, "strokes").map_err(|e| bad(cmd, e))?,
             "stroke" => {
                 let c = color_of(v).ok_or_else(|| bad(cmd, "`stroke` must be a colour"))?;
                 doc.get_mut(id)?.strokes = vec![Paint::solid(c)];
@@ -523,7 +523,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 }
             }
             "cornerSmoothing" => doc.get_mut(id)?.corners.smoothing = number_in_range(cmd, k, v)?,
-            "effects" => doc.get_mut(id)?.effects = serde_json::from_value(snake(v)).map_err(|e| bad(cmd, format!("effects: {e}")))?,
+            "effects" => doc.get_mut(id)?.effects = effects_of(&snake(v), "effects").map_err(|e| bad(cmd, e))?,
             "clip" | "clipsContent" => doc.get_mut(id)?.clip = v.as_bool().ok_or_else(|| bad(cmd, "`clip` must be a boolean"))?,
             "isMask" => doc.get_mut(id)?.is_mask = v.as_bool().unwrap_or(false),
             "devStatus" => {
@@ -1038,7 +1038,7 @@ pub fn apply_text_style(cmd: &str, t: &mut TextData, start: usize, end: usize, k
             t.restyle(start, end, |s| s.link = l.clone());
         }
         "textFills" => {
-            let p = if v.is_null() { None } else { Some(paints_of(v).ok_or_else(|| bad(cmd, "textFills: paints"))?) };
+            let p = if v.is_null() { None } else { Some(paints_of(v, "textFills").map_err(|e| bad(cmd, e))?) };
             t.restyle(start, end, |s| s.fills = p.clone());
         }
         _ => {}

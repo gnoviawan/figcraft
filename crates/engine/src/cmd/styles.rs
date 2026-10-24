@@ -303,9 +303,9 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let doc = s.doc_mut()?;
     let kind = if let Some(v) = get(p, "value") {
         match t.as_str() {
-            "paint" | "color" | "fill" => StyleKind::Paint { paints: paints_of(v).ok_or_else(|| bad(cmd, "value: paints"))? },
+            "paint" | "color" | "fill" => StyleKind::Paint { paints: paints_of(v, "value").map_err(|e| bad(cmd, e))? },
             "text" => StyleKind::Text { style: text_style_json(cmd, v)? },
-            "effect" => StyleKind::Effect { effects: serde_json::from_value(v.clone()).map_err(|e| bad(cmd, e.to_string()))? },
+            "effect" => StyleKind::Effect { effects: effects_of(v, "value").map_err(|e| bad(cmd, e))? },
             "grid" => StyleKind::Grid { grids: serde_json::from_value(v.clone()).map_err(|e| bad(cmd, e.to_string()))? },
             _ => return Err(bad(cmd, "type: paint|text|effect|grid")),
         }
@@ -483,9 +483,9 @@ fn update(s: &mut Session, p: &Value) -> Result<Value> {
     let new_kind = if let Some(v) = get(p, "value") {
         let cur = doc.styles.get(idx).map(|x| x.kind.type_name()).unwrap_or("paint");
         Some(match cur {
-            "paint" => StyleKind::Paint { paints: paints_of(v).ok_or_else(|| bad(cmd, "value: paints"))? },
+            "paint" => StyleKind::Paint { paints: paints_of(v, "value").map_err(|e| bad(cmd, e))? },
             "text" => StyleKind::Text { style: text_style_json(cmd, v)? },
-            "effect" => StyleKind::Effect { effects: serde_json::from_value(v.clone()).map_err(|e| bad(cmd, e.to_string()))? },
+            "effect" => StyleKind::Effect { effects: effects_of(v, "value").map_err(|e| bad(cmd, e))? },
             _ => StyleKind::Grid { grids: serde_json::from_value(v.clone()).map_err(|e| bad(cmd, e.to_string()))? },
         })
     } else if let Some(f) = from {

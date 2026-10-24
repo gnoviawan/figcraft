@@ -562,12 +562,8 @@ impl<'a> Exporter<'a> {
         if side > MAX_RASTER_SIDE {
             k *= MAX_RASTER_SIDE / side;
         }
-        let (pw, ph) = ((bb.width() * k).ceil().max(1.0) as u32, (bb.height() * k).ceil().max(1.0) as u32);
-        let Some(prep) = figcraft_render::paint::prepare(p, w, h, k, self.doc) else { return };
-        let Some(mut pix) = tiny_skia::Pixmap::new(pw, ph) else { return };
-        let paint = tiny_skia::Paint { shader: prep.shader(), anti_alias: false, ..Default::default() };
-        let Some(rect) = tiny_skia::Rect::from_xywh(bb.x0 as f32, bb.y0 as f32, bb.width() as f32, bb.height() as f32) else { return };
-        pix.fill_rect(rect, &paint, tiny_skia::Transform::from_row(k as f32, 0.0, 0.0, k as f32, (-bb.x0 * k) as f32, (-bb.y0 * k) as f32), None);
+        let Some(pix) = figcraft_render::paint::area_pixmap(p, w, h, bb, k, self.doc) else { return };
+        let (pw, ph) = (pix.width(), pix.height());
         let Some(size) = Size::from_wh(pw as f32, ph as f32) else { return };
         let image = self.ink().bitmap(figcraft_render::to_rgba8(&pix), pw, ph);
         s.push_clip_path(kp, &r);
