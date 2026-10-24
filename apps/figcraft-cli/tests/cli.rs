@@ -82,6 +82,29 @@ fn run_export_info_convert() {
 }
 
 #[test]
+fn export_prints_the_svg_warnings() {
+    let d = tmp("svg-warn");
+    let script = d.join("s.json");
+    std::fs::write(
+        &script,
+        r##"[{"command":"shape.rectangle","params":{"x":0,"y":0,"width":100,"height":100}},
+            {"command":"node.set","params":{"ids":[2],"fills":[{"type":"angularGradient","stops":["#ff0000","#0000ff"]}]}}]"##,
+    )
+    .unwrap();
+    let file = d.join("a.figcraft");
+    let out = bin().arg("run").arg(&script).arg("--out").arg(&file).output().unwrap();
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    for args in [&[][..], &["--node", "Rectangle"][..]] {
+        let svg = d.join("a.svg");
+        let out = bin().arg("export").arg(&file).arg("-o").arg(&svg).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("note:") && err.contains("angular"), "{args:?}: {err}");
+    }
+    std::fs::remove_dir_all(&d).ok();
+}
+
+#[test]
 fn run_takes_the_documented_gradient_shorthand() {
     // #252: only MCP used to accept it; `run` said "`fills` must be paints or colours".
     let d = tmp("gradient");
