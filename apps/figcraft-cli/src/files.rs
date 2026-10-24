@@ -231,7 +231,12 @@ pub fn export(file: &str, out: &str, t: &Target) -> CliResult<ExitCode> {
     let single = image_format(&ext(out)).is_some();
     let bytes_of = |ids: &[NodeId]| {
         let setting = ExportSetting { format: fmt, print: *print, ..Default::default() };
-        figcraft_engine::cmd::file::export_bytes_with(&doc, ids, &setting, scale).map_err(|e| CliError::Failed(e.to_string()))
+        let (bytes, warnings) =
+            figcraft_engine::cmd::file::export_with_warnings(&doc, ids, &setting, scale).map_err(|e| CliError::Failed(e.to_string()))?;
+        for w in warnings {
+            eprintln!("note: {w}");
+        }
+        Ok::<_, CliError>(bytes)
     };
     if single {
         let bytes = match target {
