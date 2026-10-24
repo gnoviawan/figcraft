@@ -528,6 +528,19 @@ fn host_file_without_a_path_or_location_clears_them_and_needs_a_name() {
 }
 
 #[test]
+fn opening_another_document_forgets_the_previous_files_path_and_location() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = kiosk_with_a_saved_file();
+    ok(&mut host, &mut app, &ctx, "host.file", design());
+    let bytes = ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}))["bytes"].clone();
+    ok(&mut host, &mut app, &ctx, "host.openDocument", json!({"bytes": bytes}));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "document.inspect", json!({}))["path"], Value::Null);
+    let shown = painted(&ctx, &mut app);
+    assert!(shown.iter().any(|t| t == "design"), "the name saved in the file: {shown:?}");
+    assert!(!shown.iter().any(|t| t == "termul"), "the previous file's location is gone until the host names this one: {shown:?}");
+}
+
+#[test]
 fn fallback_fonts_take_a_bounded_list_of_urls() {
     let (mut app, ctx, mut host) = app();
     let urls = json!({"urls": ["host-fonts/seguisym.ttf", "https://example.test/a.ttc"]}).to_string();
