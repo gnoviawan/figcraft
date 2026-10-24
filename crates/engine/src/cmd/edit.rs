@@ -1315,15 +1315,7 @@ fn paint_set(s: &mut Session, p: &Value, fills: bool) -> Result<Value> {
         None => None,
     };
     let col = color(p, "color");
-    // 0 to 1, or a percentage spelled out ("80%"): a bare 80 is refused, not guessed to be one.
-    let opacity = match get(p, "opacity") {
-        Some(v) => {
-            let percent = matches!(v, Value::String(t) if t.trim().ends_with('%'));
-            let o = f64_of(v).map(|x| if percent { x / 100.0 } else { x }).filter(|x| (0.0..=1.0).contains(x));
-            Some(o.ok_or_else(|| bad(cmd, format!("`opacity` must be between 0 and 1 (or a percentage such as \"80%\"), not {v}")))?)
-        }
-        None => None,
-    };
+    let opacity = get(p, "opacity").map(|v| super::props::number_in_range(cmd, "opacity", v)).transpose()?;
     let doc = s.doc_mut()?;
     for i in ids {
         let n = doc.get_mut(i)?;
