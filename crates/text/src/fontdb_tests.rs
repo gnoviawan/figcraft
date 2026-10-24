@@ -179,3 +179,41 @@ fn user_font_dirs_preserve_non_utf8_paths() {
     assert_eq!(dirs[0].as_os_str().as_bytes(), b"/home/\xff/.fonts");
     assert_eq!(dirs[1].as_os_str().as_bytes(), b"/data/\xfe/fonts");
 }
+
+/// Any font file this build or machine has (CI has neither craft-fonts nor, maybe, system fonts).
+fn some_font() -> Option<Vec<u8>> {
+    CRAFT_FONTS.first().map(|f| f.bytes.to_vec()).or_else(|| {
+        ["C:/Windows/Fonts/arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf"]
+            .iter()
+            .find_map(|p| std::fs::read(p).ok())
+    })
+}
+
+#[test]
+fn a_fallback_file_sent_again_is_not_loaded_again() {
+    let Some(font) = some_font() else { return };
+    let mut db = FontDb::default();
+    let first = db.add_fallback_bytes(font.clone());
+    assert!(!first.is_empty());
+    let again = db.add_fallback_bytes(font);
+    assert_eq!(db.face_count(), first.len(), "no second copy of the file");
+    assert!(first.iter().zip(&again).all(|(a, b)| Arc::ptr_eq(a, b)), "the same faces come back");
+}
+
+#[test]
+fn every_file_of_a_split_fallback_family_is_tried() {
+    // Two files with the same family and style (a family split into subsets) each cover
+    // characters the other lacks, so both are fallbacks, whether the family is a built-in one or not.
+    let Some(font) = some_font() else { return };
+    let mut split = font.clone();
+    split.extend([0; 4]);
+    let mut db = FontDb::default();
+    let a = db.add_fallback_bytes(font)[0].clone();
+    let b = db.add_fallback_bytes(split)[0].clone();
+    assert_eq!((&a.family, &a.style), (&b.family, &b.style));
+    let has = |v: &[Arc<Face>], f: &Arc<Face>| v.iter().any(|x| Arc::ptr_eq(x, f));
+    let fallbacks = db.fallbacks_for(&a.style);
+    assert!(has(&fallbacks, &a) && has(&fallbacks, &b), "{} {}: {fallbacks:?}", a.family, a.style);
+    let host = db.host_fallbacks_for(&a.style, &[], a.has_color());
+    assert!(has(&host, &a) && has(&host, &b), "{} {}: {host:?}", a.family, a.style);
+}

@@ -73,6 +73,9 @@ const HOST_METHODS: &[(&str, HostMethod)] = &[
     ("host.file", HostMethod::File),
 ];
 
+/// Most font files one `host.fallbackFonts` call fetches.
+const FALLBACK_FONTS_MAX: usize = 16;
+
 /// Control methods that act on the session alone: answered at once, outside any frame.
 const ENGINE_METHODS: &[&str] = &["engine.execute", "engine.commands", "document.inspect", "node.get"];
 
@@ -82,12 +85,17 @@ enum Route {
     Host(HostMethod),
     /// `ui.*`: needs an egui pass, so it waits for the next frame.
     Frame,
+    /// `host.fallbackFonts`: the transport fetches the files, then the reply follows.
+    Fonts,
     Unknown,
 }
 
 fn route(method: &str) -> Route {
     if ENGINE_METHODS.contains(&method) {
         return Route::Engine;
+    }
+    if method == "host.fallbackFonts" {
+        return Route::Fonts;
     }
     if let Some((_, m)) = HOST_METHODS.iter().find(|(name, _)| *name == method) {
         return Route::Host(*m);
@@ -103,6 +111,8 @@ pub enum Answer {
     Now(Result<String, HostError>),
     /// A `ui.*` method queued for the next frame; the frame's control drain replies here.
     Later(Receiver<ControlReply>),
+    /// `host.fallbackFonts`: fetch these URLs, then reply with [`add_fallback_fonts`] of them.
+    FetchFonts(Vec<String>),
 }
 
 /// What `event.dirtyChanged` reports.
@@ -204,6 +214,7 @@ impl Host {
                 ctx.request_repaint();
                 return Answer::Later(rx);
             }
+            Route::Fonts => return font_urls(&p).map_or_else(|e| Answer::Now(Err(e)), Answer::FetchFonts),
             Route::Engine => figcraft_ui_egui::control::handle(app, ctx, method, &p).map_err(engine_error),
             Route::Host(m) => self.host(app, ctx, m, &p),
             Route::Unknown => return unknown(),
@@ -333,6 +344,40 @@ fn optional_text(p: &Value, key: &str) -> Result<Option<String>, HostError> {
         Some(Value::String(s)) => Ok(Some(s.clone())),
         Some(_) => Err(engine_error(format!("`{key}` must be text or null"))),
     }
+}
+
+/// `host.fallbackFonts`' `urls`: font files to fetch, resolved against the editor's page.
+fn font_urls(p: &Value) -> Result<Vec<String>, HostError> {
+    let urls = p.get("urls").and_then(Value::as_array).ok_or_else(|| engine_error("`urls` (font file URLs) required"))?;
+    if urls.len() > FALLBACK_FONTS_MAX {
+        return Err(engine_error(format!("at most {FALLBACK_FONTS_MAX} `urls`")));
+    }
+    urls.iter()
+        .map(|u| u.as_str().filter(|u| !u.is_empty()).map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| engine_error("`urls` holds something that is not a URL"))
+}
+
+/// `host.fallbackFonts`' result once its files are fetched (each URL with its bytes or why it
+/// has none): every face they hold becomes a fallback for characters a text's own font lacks.
+/// A file that fails is listed, not fatal, so one missing font costs only its characters.
+pub fn add_fallback_fonts(files: Vec<(String, Result<Vec<u8>, String>)>) -> String {
+    let mut families: Vec<String> = Vec::new();
+    let mut failed = Vec::new();
+    for (url, bytes) in files {
+        match bytes.map(figcraft_text::add_fallback_font) {
+            Ok(added) if !added.is_empty() => {
+                for family in added {
+                    if !families.contains(&family) {
+                        families.push(family);
+                    }
+                }
+            }
+            Ok(_) => failed.push(json!({"url": url, "error": "not a font file"})),
+            Err(error) => failed.push(json!({"url": url, "error": error})),
+        }
+    }
+    json!({"families": families, "failed": failed}).to_string()
 }
 
 fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str, HostError> {
