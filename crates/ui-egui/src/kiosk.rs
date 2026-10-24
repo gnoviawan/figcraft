@@ -18,8 +18,7 @@ fn leaves_the_document(name: &str) -> bool {
 }
 
 /// Menu items that open a file dialog or save the file where the editor chooses.
-const FILE_MENU_ITEMS: &[&str] =
-    &["file.open", "file.openRecent", "file.import", "file.placeImage", "file.save", "file.saveAs", "plugin.import"];
+const FILE_MENU_ITEMS: &[&str] = &["file.open", "file.openRecent", "file.import", "file.placeImage", "file.save", "file.saveAs", "plugin.import"];
 
 /// Requests a command raises for the UI that bring back the shell, open a window or ask about
 /// saving.
