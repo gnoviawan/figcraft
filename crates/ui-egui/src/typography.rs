@@ -179,7 +179,9 @@ fn font_rows(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], styles: &[TextStyle]
     let fstyle = uniform(styles, |s| s.font_style.clone());
     row(ui, 32.0, |ui| {
         let w = ui.available_width();
-        let resp = widgets::dropdown(ui, family.as_deref().unwrap_or(tr(MIXED)), w, None);
+        let missing = family.as_deref().is_some_and(|f| !figcraft_text::db().read().unwrap_or_else(std::sync::PoisonError::into_inner).has_family(f));
+        let resp = widgets::dropdown(ui, family.as_deref().unwrap_or(tr(MIXED)), w, missing.then_some(Icon::GamutWarning));
+        let resp = if missing { resp.on_hover_text(tr("Font not installed")) } else { resp };
         menu_popup(&resp).width(w.max(240.0)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             let pick = font_picker(ui, family.as_deref(), resp.clicked());
             if let Some(f) = pick.picked {

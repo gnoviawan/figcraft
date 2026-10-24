@@ -257,13 +257,15 @@ pub fn create(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let index = crate::params::opt_index(cmd, p, "index")?;
     doc.insert(node, parent, index)?;
+    let mut warnings = Vec::new();
     if let Some(Value::Object(props)) = get(p, "props") {
         super::props::apply(cmd, doc, nid, props)?;
+        warnings = super::props::font_warnings(doc, &[nid], props);
     }
     if boolean(p, "select").unwrap_or(true) {
         ds.selection = vec![nid];
     }
-    Ok(json!({"id": nid}))
+    if warnings.is_empty() { Ok(json!({"id": nid})) } else { Ok(json!({"id": nid, "warnings": warnings})) }
 }
 
 fn frame_create(s: &mut Session, p: &Value) -> Result<Value> {

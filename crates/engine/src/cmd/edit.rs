@@ -1157,7 +1157,7 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
             .collect(),
         None => Vec::new(),
     };
-    let mut warnings = font_style_warnings(&s.ds()?.doc, &ids, &props);
+    let mut warnings = Vec::new();
     // Auto layout keys go to the layers that can have auto layout; with none among the targets,
     // the first refuses them (`props::layout_mut`).
     let layout_keys: Vec<&str> = props.keys().map(String::as_str).filter(|k| super::props::LAYOUT_KEYS.contains(k)).collect();
@@ -1182,10 +1182,11 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let doc = s.doc_mut()?;
-    for i in ids {
+    for &i in &ids {
         let props = if skipped.contains(&i) { &without_layout } else { &props };
         super::props::apply("node.set", doc, i, props)?;
     }
+    warnings.extend(super::props::font_warnings(doc, &ids, &props));
     if let Some(o) = pivot {
         for (i, q) in pinned {
             let d = o - doc.world_transform(i) * q;
@@ -1195,42 +1196,6 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     if warnings.is_empty() { ok() } else { Ok(json!({"ok": true, "warnings": warnings})) }
-}
-
-/// A `fontStyle` draws in the family's face nearest to it, as a text layer resolves it. When that
-/// face has another weight or slant than the name asks for ("Black" on a family whose heaviest is
-/// Bold), say which face it is. Families that aren't installed, and names that match a style or a
-/// named instance (spelled any way: "SemiBold", "Semi Bold"), say nothing.
-fn font_style_warnings(doc: &figcraft_doc::Document, ids: &[NodeId], props: &serde_json::Map<String, Value>) -> Vec<String> {
-    let Some(style) = props.get("fontStyle").and_then(Value::as_str) else { return Vec::new() };
-    let mut families: Vec<String> = match props.get("fontFamily").and_then(Value::as_str) {
-        Some(f) => vec![f.to_string()],
-        None => ids
-            .iter()
-            .filter_map(|i| doc.node(*i))
-            .filter_map(|n| n.kind.text())
-            .flat_map(|t| t.spans().into_iter().map(|(_, _, st)| st.font_family.clone()).collect::<Vec<_>>())
-            .collect(),
-    };
-    families.sort();
-    families.dedup();
-    let norm = |s: &str| s.to_lowercase().replace([' ', '-', '_'], "");
-    let (want_w, want_i) = (i32::from(figcraft_doc::style_weight(style)), style.to_lowercase().contains("italic"));
-    families
-        .into_iter()
-        .filter_map(|family| {
-            let styles = figcraft_text::family_styles(&family);
-            if styles.is_empty() || styles.iter().any(|x| norm(x) == norm(style)) {
-                return None;
-            }
-            let face = figcraft_text::find_face(&family, style).filter(|f| f.family.eq_ignore_ascii_case(&family))?;
-            let w = face.axis("wght").map_or(i32::from(face.weight), |a| a.clamp(f64::from(want_w)).round() as i32);
-            if face.instance(style).is_some() || (w == want_w && face.italic == want_i) {
-                return None;
-            }
-            Some(format!("{family} has no `{style}` style: it draws in {}, the nearest (it has: {})", face.style, styles.join(", ")))
-        })
-        .collect()
 }
 
 /// `stroke.widthProfile`: a preset or points (through `node.set`'s `widthProfile`, so instances

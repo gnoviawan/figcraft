@@ -221,6 +221,15 @@ fn set_properties_passes_on_what_it_skipped() {
 }
 
 #[test]
+fn create_node_passes_on_a_missing_font() {
+    let mut c = Client::new();
+    let r = c.ok("create_node", json!({"type": "text", "text": "Hi", "props": {"fontFamily": "NoSuchFontXYZ", "fontStyle": "Black Italic"}}));
+    assert!(r["warnings"][0].as_str().is_some_and(|w| w.contains("NoSuchFontXYZ") && w.contains("not installed")), "{r}");
+    assert!(r["node"].is_object(), "{r}");
+    assert!(c.ok("create_node", json!({"type": "text", "text": "Hi"})).get("warnings").is_none());
+}
+
+#[test]
 fn set_properties_refuses_out_of_range_numbers_instead_of_rescaling_them() {
     let mut c = Client::new();
     let f = c.ok("create_node", json!({"type": "frame", "width": 400, "props": {"layout": "horizontal", "padding": 16}}))["id"].clone();

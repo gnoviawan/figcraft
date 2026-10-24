@@ -177,7 +177,8 @@ icons! {
     ArcSweep,
     /// Arc ratio: a ring.
     ArcRatio,
-    /// A colour outside the screen's gamut: a triangle with an exclamation mark.
+    /// A warning (a colour outside the screen's gamut, a font that isn't installed): a triangle
+    /// with an exclamation mark.
     GamutWarning,
     /// Online: a globe (a circle with its equator and a meridian).
     Online,
