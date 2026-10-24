@@ -503,6 +503,8 @@ pub struct UiState {
     pub dark: bool,
     /// Colours an embedding host set (`host.theme`): while set, they replace the theme preference.
     pub host_theme: Option<theme::Tokens>,
+    /// Where an embedding host keeps the file (`host.file`), shown under its name in place of "Drafts".
+    pub host_location: Option<String>,
     pub follow_system: bool,
     pub tool_flyout: Option<&'static str>,
     pub last_error: Option<String>,
@@ -636,6 +638,7 @@ impl Default for UiState {
             layers_seen_sel: Vec::new(),
             dark: false,
             host_theme: None,
+            host_location: None,
             follow_system: false,
             tool_flyout: None,
             last_error: None,

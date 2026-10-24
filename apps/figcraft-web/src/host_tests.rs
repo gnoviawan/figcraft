@@ -429,6 +429,117 @@ fn guest_calls_work_in_a_kiosk_and_while_the_canvas_is_hidden() {
     }
 }
 
+/// A kiosk holding a saved document the editor named "Untitled", as Termul loads it.
+fn kiosk_with_a_saved_file() -> (FigApp, egui::Context, Host) {
+    let (mut app, ctx, mut host) = self::app();
+    rect(&mut host, &mut app, &ctx);
+    let bytes = ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}))["bytes"].clone();
+    let (mut kiosk, ctx, mut host) = kiosk_app();
+    ok(&mut host, &mut kiosk, &ctx, "host.openDocument", json!({"bytes": bytes}));
+    (kiosk, ctx, host)
+}
+
+fn design() -> Value {
+    json!({"name": "design", "path": "design.figcraft", "location": "termul"})
+}
+
+/// Every text the frame paints.
+fn painted(ctx: &egui::Context, app: &mut FigApp) -> Vec<String> {
+    fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| texts(s, out)),
+            _ => {}
+        }
+    }
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1440.0, 900.0));
+    let mut out = Vec::new();
+    // The first frames only install fonts and lay out: the third one paints the panels.
+    for _ in 0..3 {
+        let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| app.ui(ui));
+        output.textures_delta.clear();
+        out.clear();
+        output.shapes.iter().for_each(|c| texts(&c.shape, &mut out));
+    }
+    out
+}
+
+#[test]
+fn the_file_the_host_names_is_what_inspect_and_the_window_title_report() {
+    let (mut app, ctx, mut host) = kiosk_with_a_saved_file();
+    let before = host.state(&app.session);
+    assert_eq!(ok(&mut host, &mut app, &ctx, "host.file", design()), json!({"contentVersion": before.content_version}));
+    let doc = ok(&mut host, &mut app, &ctx, "document.inspect", json!({}));
+    assert_eq!((&doc["name"], &doc["path"]), (&json!("design"), &json!("design.figcraft")));
+    let ui = app.inspect();
+    assert_eq!((&ui["status"]["document"], &ui["status"]["path"]), (&json!("design"), &json!("design.figcraft")));
+    assert_eq!(ui["windows"][0]["title"], json!(format!("design – {}", figcraft_ui_egui::brand::NAME)));
+    assert_eq!(host.state(&app.session), before, "naming the file is not an edit: still clean, same contentVersion");
+}
+
+#[test]
+fn the_header_shows_the_file_and_the_hosts_location_instead_of_drafts() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = kiosk_with_a_saved_file();
+    let shown = painted(&ctx, &mut app);
+    assert!(shown.iter().any(|t| t == "Untitled"), "the name stored in the file until the host names it: {shown:?}");
+    ok(&mut host, &mut app, &ctx, "host.file", design());
+    let shown = painted(&ctx, &mut app);
+    assert!(shown.iter().any(|t| t == "design"), "{shown:?}");
+    assert!(shown.iter().any(|t| t == "termul"), "{shown:?}");
+    assert!(!shown.iter().any(|t| t == "Untitled" || t == "Drafts"), "{shown:?}");
+}
+
+#[test]
+fn outside_a_kiosk_the_header_still_says_drafts() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = self::app();
+    rect(&mut host, &mut app, &ctx);
+    app.ui.home = false;
+    let shown = painted(&ctx, &mut app);
+    assert!(shown.iter().any(|t| t == "Drafts"), "{shown:?}");
+}
+
+#[test]
+fn the_hosts_name_is_saved_with_the_file_and_an_edit_stays_unsaved() {
+    let (mut app, ctx, mut host) = kiosk_with_a_saved_file();
+    rect(&mut host, &mut app, &ctx);
+    ok(&mut host, &mut app, &ctx, "host.file", design());
+    assert!(host.state(&app.session).dirty, "the edit is still to be saved");
+    let bytes = ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}))["bytes"].clone();
+    let (mut other, ctx2, mut host2) = self::app();
+    ok(&mut host2, &mut other, &ctx2, "host.openDocument", json!({"bytes": bytes}));
+    assert_eq!(ok(&mut host2, &mut other, &ctx2, "document.inspect", json!({}))["name"], json!("design"));
+}
+
+#[test]
+fn host_file_without_a_path_or_location_clears_them_and_needs_a_name() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = kiosk_with_a_saved_file();
+    ok(&mut host, &mut app, &ctx, "host.file", design());
+    ok(&mut host, &mut app, &ctx, "host.file", json!({"name": "design"}));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "document.inspect", json!({}))["path"], Value::Null);
+    let shown = painted(&ctx, &mut app);
+    assert!(!shown.iter().any(|t| t == "termul" || t == "Drafts"), "a kiosk without a location shows none: {shown:?}");
+    for bad in [json!({}), json!({"name": ""}), json!({"name": 3}), json!({"name": "a", "path": 1}), json!({"name": "a", "location": false})] {
+        let err = now(host.call(&mut app, &ctx, "host.file", &bad.to_string(), false)).unwrap_err();
+        assert_eq!(err.code, Code::EngineError, "{bad}");
+    }
+}
+
+#[test]
+fn opening_another_document_forgets_the_previous_files_path_and_location() {
+    let _turn = LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (mut app, ctx, mut host) = kiosk_with_a_saved_file();
+    ok(&mut host, &mut app, &ctx, "host.file", design());
+    let bytes = ok(&mut host, &mut app, &ctx, "host.snapshot", json!({}))["bytes"].clone();
+    ok(&mut host, &mut app, &ctx, "host.openDocument", json!({"bytes": bytes}));
+    assert_eq!(ok(&mut host, &mut app, &ctx, "document.inspect", json!({}))["path"], Value::Null);
+    let shown = painted(&ctx, &mut app);
+    assert!(shown.iter().any(|t| t == "design"), "the name saved in the file: {shown:?}");
+    assert!(!shown.iter().any(|t| t == "termul"), "the previous file's location is gone until the host names this one: {shown:?}");
+}
+
 #[test]
 fn fallback_fonts_take_a_bounded_list_of_urls() {
     let (mut app, ctx, mut host) = app();

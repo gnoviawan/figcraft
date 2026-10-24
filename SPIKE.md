@@ -66,6 +66,17 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
     payloads are in "Theme, locale and brand (E1-3)" below.
   - `host.describe` → `{tag, engineVersion}`. `tag` comes from the build-time `FIGCRAFT_HOST_TAG`
     and defaults to `dev`.
+  - `host.file {name, path?, location?}` → `{contentVersion}` names the file the host keeps the
+    document in. The host sends it after every `host.openDocument` and for a new document, since
+    a load replaces the name and clears the path and location.
+    - `name` becomes the document's name, so the header, the window title, `document.inspect` and
+      `ui.inspect` show it, and the next snapshot saves it.
+    - `path` is reported as the document's `path`. The editor never reads or writes it. Termul sends a
+      project-relative path, never an absolute one.
+    - `location` replaces "Drafts" under the name. A kiosk without one shows nothing there.
+    - Naming is not an edit. A clean document stays clean, and `contentVersion` does not change.
+      An undo of an edit made before the call brings the older name back.
+    - Omitting `path` or `location` clears it. An empty or non-text `name` is `ENGINE_ERROR`.
   - `host.fallbackFonts {urls}` → `{families, failed: [{url, error}]}`. The editor fetches up to 16
     font files and every face in them becomes a fallback. See "Glyph fallback (termul#1421)" below.
 - **`ui.*`.** These are queued on upstream's control queue, and the next frame's drain answers them.
