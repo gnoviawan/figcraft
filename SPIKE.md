@@ -84,11 +84,12 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
   strong reference, so copy-on-write always gives an edited document a new pointer. Selection,
   viewport, and version or text previews do not bump it. A gesture in progress counts once, when
   committed.
-- **No engine change was needed.** No change was made in `crates/`.
+- **Engine changes.** The host API needed none. Glyph fallback added `add_fallback_font` to
+  `figcraft-text` (see "Glyph fallback (termul#1421)" below).
 
-Tests: `cargo test -p figcraft-web` has 10 host-API tests, covering ids above 2^53 surviving as
-text, contentVersion semantics, stale `markSaved`, a snapshot round trip, render and export, typed
-errors and ready gating.
+Tests: `cargo test -p figcraft-web` runs the host-API tests in `src/host_tests.rs`. They cover ids
+above 2^53 surviving as text, contentVersion semantics, stale `markSaved`, a snapshot round trip,
+render and export, typed errors, ready gating and `host.fallbackFonts`.
 
 ## Theme, locale and brand (E1-3)
 
