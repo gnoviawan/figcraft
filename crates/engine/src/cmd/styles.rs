@@ -984,7 +984,7 @@ fn apply_bindings_matching(doc: &mut Document, only: Option<&std::collections::B
                 VariableValue::Number(x) if field == "arcSweep" => json!(x * 3.6),
                 VariableValue::Number(x) if field == "arcInner" => json!(x / 100.0),
                 VariableValue::Number(x) if field == "characters" => json!(trim_num(*x)),
-                VariableValue::Number(x) => json!(x),
+                VariableValue::Number(x) => json!(super::props::clamp_to_range(&field, *x)),
                 VariableValue::String(x) => json!(x),
                 VariableValue::Boolean(b) => json!(b),
                 VariableValue::Alias(_) => continue,

@@ -1641,7 +1641,9 @@ result. This builds a nested tree in one call and one undo step, without guessin
 ```
 
 A reference to the same or a later step, a negative or non-integer index, a missing `field` or any
-other key next to `$step` fails the whole batch, which is rolled back. Only an object whose keys are
+other key next to `$step` fails the whole batch, which is rolled back. So does any step that fails,
+and the error starts with the step's index and command, and the `name` in its params if it has one:
+``step 35 (node.create "Placeholder"): invalid parameters for `node.create`: …``. Only an object whose keys are
 `$step` (and optionally `field`) is a reference: text such as `"$step 0"` is left as written. The
 `$step` key is reserved in step params: an object holding it anywhere (in plugin data or a variable
 value too) is read as a reference. A step that is itself a `command.batch` is passed on as written,

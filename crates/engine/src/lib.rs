@@ -95,6 +95,10 @@ pub enum EngineError {
     /// A bug: the command panicked. The document was rolled back.
     #[error("internal error in `{cmd}`: {msg} (the document was left as it was before; please report this bug)")]
     Internal { cmd: String, msg: String },
+    /// Step `step` of a `command.batch` failed. `command` is the step's command id and, when its
+    /// params give one, the layer name: `node.create "Card"`.
+    #[error("step {step} ({command}): {source}")]
+    Step { step: usize, command: String, source: Box<EngineError> },
 }
 
 impl From<figcraft_doc::DocError> for EngineError {
@@ -112,6 +116,19 @@ pub fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.to_string(), msg: msg.into() }
 }
 
+/// `e`, the error batch step `step` (`cmd` with `params`) failed with, wrapped to name the step.
+/// [`EngineError::Waiting`] passes through as it is: the background runner reruns the batch on it.
+fn step_error(e: EngineError, step: usize, cmd: &str, params: &Value) -> EngineError {
+    if matches!(e, EngineError::Waiting) {
+        return e;
+    }
+    let command = match params.get("name").and_then(Value::as_str) {
+        Some(name) => format!("{cmd} {name:?}"),
+        None => cmd.to_string(),
+    };
+    EngineError::Step { step, command, source: Box::new(e) }
+}
+
 /// Deepest params nesting `resolve_step_refs` walks before giving up.
 const STEP_REF_MAX_DEPTH: usize = 64;
 
@@ -119,27 +136,24 @@ const STEP_REF_MAX_DEPTH: usize = 64;
 /// `id`) of `results[n]`, the result of an earlier batch step.
 fn resolve_step_refs(v: &Value, results: &[Value], step: usize, depth: usize) -> Result<Value> {
     if depth > STEP_REF_MAX_DEPTH {
-        return Err(bad("command.batch", format!("step {step}: params nest deeper than {STEP_REF_MAX_DEPTH} levels")));
+        return Err(bad("command.batch", format!("params nest deeper than {STEP_REF_MAX_DEPTH} levels")));
     }
     match v {
         Value::Object(o) if o.contains_key("$step") => {
             if let Some(k) = o.keys().find(|k| *k != "$step" && *k != "field") {
-                return Err(bad("command.batch", format!("step {step}: a `$step` reference takes only `field`, not `{k}`")));
+                return Err(bad("command.batch", format!("a `$step` reference takes only `field`, not `{k}`")));
             }
-            let n = o
-                .get("$step")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| bad("command.batch", format!("step {step}: `$step` must be a step index (0, 1, …)")))?;
+            let n = o.get("$step").and_then(Value::as_u64).ok_or_else(|| bad("command.batch", "`$step` must be a step index (0, 1, …)"))?;
             let field = match o.get("field") {
                 None => "id",
                 Some(Value::String(f)) => f.as_str(),
-                Some(_) => return Err(bad("command.batch", format!("step {step}: `field` must be a string"))),
+                Some(_) => return Err(bad("command.batch", "`field` must be a string")),
             };
             let Some(result) = usize::try_from(n).ok().and_then(|n| results.get(n)) else {
                 let range = if step == 0 { "there is none before step 0".to_string() } else { format!("0 to {}", step - 1) };
-                return Err(bad("command.batch", format!("step {step}: `$step` {n} must be an earlier step ({range})")));
+                return Err(bad("command.batch", format!("`$step` {n} must be an earlier step ({range})")));
             };
-            result.get(field).cloned().ok_or_else(|| bad("command.batch", format!("step {step}: step {n}'s result has no `{field}`")))
+            result.get(field).cloned().ok_or_else(|| bad("command.batch", format!("step {n}'s result has no `{field}`")))
         }
         Value::Object(o) => {
             let mut out = serde_json::Map::with_capacity(o.len());
@@ -1192,7 +1206,7 @@ impl Session {
         self.grouped(label, |s| {
             let mut results: Vec<Value> = Vec::with_capacity(cmds.len());
             for (step, (id, p)) in cmds.iter().enumerate() {
-                let v = s.batch_step(&results, step, id, p)?;
+                let v = s.batch_step(&results, step, id, p).map_err(|e| step_error(e, step, id, p))?;
                 results.push(v);
             }
             Ok(results)

@@ -128,3 +128,80 @@ fn a_refused_call_changes_nothing() {
     assert!(s.execute("node.set", &json!({"ids": [t], "props": {"fill": "#FF0000", "gap": 8}})).is_err());
     assert_eq!(s.doc().unwrap().node(t).unwrap().fills, before);
 }
+
+fn frame_with_layout(s: &mut Session) -> crate::NodeId {
+    let props = json!({"layout": "horizontal", "padding": 16, "sizingH": "fixed"});
+    id(&ex(s, "node.create", json!({"type": "frame", "width": 400, "height": 100, "props": props}))["id"])
+}
+
+#[test]
+fn out_of_range_numbers_are_refused_naming_the_key_and_its_range() {
+    let mut s = Session::new();
+    let f = frame_with_layout(&mut s);
+    let r = id(&ex(&mut s, "node.create", json!({"type": "rectangle", "width": 40, "height": 40}))["id"]);
+    let cases = [
+        (f, json!({"opacity": 1.5}), "opacity", "between 0 and 1"),
+        (f, json!({"opacity": 5}), "opacity", "between 0 and 1"),
+        (f, json!({"opacity": 80}), "opacity", "between 0 and 1"),
+        (f, json!({"opacity": -0.1}), "opacity", "between 0 and 1"),
+        (f, json!({"cornerSmoothing": 1.5}), "cornerSmoothing", "between 0 and 1"),
+        (f, json!({"width": -50}), "width", "0 or more"),
+        (f, json!({"height": -1}), "height", "0 or more"),
+        (f, json!({"w": -1}), "w", "0 or more"),
+        (f, json!({"width": "50%"}), "width", "0 or more"),
+        (r, json!({"cornerRadius": -10}), "cornerRadius", "0 or more"),
+        (r, json!({"cornerRadius": [4, -1, 0, 0]}), "cornerRadius", "0 or more"),
+        (r, json!({"topLeftRadius": -1}), "topLeftRadius", "0 or more"),
+        (r, json!({"strokeWeight": -1}), "strokeWeight", "0 or more"),
+        (r, json!({"strokeTopWeight": -2}), "strokeTopWeight", "0 or more"),
+        (r, json!({"strokeSides": [1, -1, 1, 1]}), "strokeSides", "0 or more"),
+    ];
+    for (target, props, key, range) in cases {
+        let before = s.doc().unwrap().node(target).unwrap().clone();
+        let msg = bad_msg(s.execute("node.set", &json!({"ids": [target], "props": props})));
+        assert!(msg.contains(&format!("`{key}`")) && msg.contains(range), "{props}: {msg}");
+        let after = s.doc().unwrap().node(target).unwrap();
+        assert_eq!(
+            (after.opacity, after.width, after.height, after.corners.radii, after.stroke.weight, after.stroke.sides),
+            (before.opacity, before.width, before.height, before.corners.radii, before.stroke.weight, before.stroke.sides),
+            "{props} changed the layer"
+        );
+    }
+}
+
+#[test]
+fn in_range_numbers_and_explicit_percentages_apply() {
+    let mut s = Session::new();
+    let r = id(&ex(&mut s, "node.create", json!({"type": "rectangle", "width": 40, "height": 40}))["id"]);
+    let set = |s: &mut Session, props: Value| ex(s, "node.set", json!({"ids": [r], "props": props}));
+    let opacity = |s: &Session| s.doc().unwrap().node(r).unwrap().opacity;
+    for (v, want) in [(json!(0), 0.0), (json!(1), 1.0), (json!(0.5), 0.5), (json!("80%"), 0.8), (json!("100%"), 1.0), (json!("0%"), 0.0)] {
+        set(&mut s, json!({"opacity": v}));
+        assert!((opacity(&s) - want).abs() < 1e-6, "opacity {v} → {}", opacity(&s));
+    }
+    assert!(s.execute("node.set", &json!({"ids": [r], "props": {"opacity": "150%"}})).is_err(), "150% is out of range");
+    set(&mut s, json!({"cornerSmoothing": "60%", "cornerRadius": [0, 4, 8, 12], "strokeWeight": 0, "width": 0}));
+    let n = s.doc().unwrap().node(r).unwrap();
+    assert_eq!((n.corners.smoothing, n.corners.radii, n.stroke.weight, n.width), (0.6, [0.0, 4.0, 8.0, 12.0], 0.0, 0.0));
+}
+
+#[test]
+fn node_create_refuses_out_of_range_props_and_creates_nothing() {
+    let mut s = Session::new();
+    let page = s.page().unwrap();
+    let count = |s: &Session| s.doc().unwrap().node(page).unwrap().children.len();
+    let before = count(&s);
+    let cases = [
+        (json!({"type": "rectangle", "props": {"opacity": 1.5}}), "opacity"),
+        (json!({"type": "rectangle", "props": {"cornerRadius": -10}}), "cornerRadius"),
+        (json!({"type": "rectangle", "props": {"strokeWeight": -1}}), "strokeWeight"),
+        (json!({"type": "rectangle", "props": {"width": -50}}), "width"),
+        (json!({"type": "frame", "width": -50}), "width"),
+        (json!({"type": "ellipse", "height": -1}), "height"),
+    ];
+    for (params, key) in cases {
+        let msg = bad_msg(s.execute("node.create", &params));
+        assert!(msg.contains(&format!("`{key}`")), "{params}: {msg}");
+        assert_eq!(count(&s), before, "{params} left a layer behind");
+    }
+}

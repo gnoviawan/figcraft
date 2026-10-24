@@ -228,3 +228,17 @@ fn create_node_passes_on_a_missing_font() {
     assert!(r["node"].is_object(), "{r}");
     assert!(c.ok("create_node", json!({"type": "text", "text": "Hi"})).get("warnings").is_none());
 }
+
+#[test]
+fn set_properties_refuses_out_of_range_numbers_instead_of_rescaling_them() {
+    let mut c = Client::new();
+    let f = c.ok("create_node", json!({"type": "frame", "width": 400, "props": {"layout": "horizontal", "padding": 16}}))["id"].clone();
+    for (props, key) in [(json!({"opacity": 1.5}), "`opacity`"), (json!({"width": -50}), "`width`"), (json!({"cornerRadius": -10}), "`cornerRadius`")]
+    {
+        let e = c.err("set_properties", json!({"ids": [f], "props": props}));
+        assert!(e.contains(key), "{props}: {e}");
+    }
+    let node = c.ok("set_properties", json!({"ids": [f], "props": {"opacity": "80%"}}))["nodes"][0].clone();
+    assert!((node["opacity"].as_f64().unwrap() - 0.8).abs() < 1e-6, "{node}");
+    assert_eq!(node["width"], json!(400.0));
+}

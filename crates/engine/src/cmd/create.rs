@@ -180,12 +180,12 @@ pub fn create(s: &mut Session, p: &Value) -> Result<Value> {
     let space = if pn.kind.bounds_follow_children() { doc.frame_relative(parent) } else { figcraft_geom::Affine::IDENTITY };
     let x = num_or(p, "x", 0.0);
     let y = num_or(p, "y", 0.0);
+    let size = |k: &str, default: f64| get(p, k).filter(|v| !v.is_null()).map_or(Ok(default), |v| super::props::number_in_range(cmd, k, v));
     let (mut w, mut h) = match base {
-        "Line" | "Arrow" => (num_or(p, "width", 100.0), 0.0),
-        "Text" => (num_or(p, "width", 0.0), num_or(p, "height", 0.0)),
-        "Frame" | "Component" => (num_or(p, "width", 100.0), num_or(p, "height", 100.0)),
-        "Section" => (num_or(p, "width", 400.0), num_or(p, "height", 300.0)),
-        _ => (num_or(p, "width", 100.0), num_or(p, "height", 100.0)),
+        "Line" | "Arrow" => (size("width", 100.0)?, 0.0),
+        "Text" => (size("width", 0.0)?, size("height", 0.0)?),
+        "Section" => (size("width", 400.0)?, size("height", 300.0)?),
+        _ => (size("width", 100.0)?, size("height", 100.0)?),
     };
     // Vectors: path data or points define the shape and its box.
     let mut offset = (0.0, 0.0);

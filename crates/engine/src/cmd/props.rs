@@ -11,10 +11,75 @@ use crate::{Result, bad};
 /// The per-side stroke weight keys, in `StrokeProps::sides` order (top, right, bottom, left).
 pub const STROKE_SIDES: [&str; 4] = ["strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight"];
 
+/// What a numeric key takes. Nothing is rescaled by its size: a percentage is only one spelled out.
+#[derive(Clone, Copy)]
+enum NumberRange {
+    /// 0 to 1, or a percentage such as "80%".
+    Fraction,
+    NonNegative,
+}
+
+/// The numeric keys with a range; a value outside it is refused.
+const RANGES: &[(&str, NumberRange)] = &[
+    ("opacity", NumberRange::Fraction),
+    ("cornerSmoothing", NumberRange::Fraction),
+    ("width", NumberRange::NonNegative),
+    ("height", NumberRange::NonNegative),
+    ("w", NumberRange::NonNegative),
+    ("h", NumberRange::NonNegative),
+    ("strokeWeight", NumberRange::NonNegative),
+    ("strokeSides", NumberRange::NonNegative),
+    ("strokeTopWeight", NumberRange::NonNegative),
+    ("strokeRightWeight", NumberRange::NonNegative),
+    ("strokeBottomWeight", NumberRange::NonNegative),
+    ("strokeLeftWeight", NumberRange::NonNegative),
+    ("cornerRadius", NumberRange::NonNegative),
+    ("topLeftRadius", NumberRange::NonNegative),
+    ("topRightRadius", NumberRange::NonNegative),
+    ("bottomRightRadius", NumberRange::NonNegative),
+    ("bottomLeftRadius", NumberRange::NonNegative),
+];
+
+fn number_range(k: &str) -> Option<NumberRange> {
+    RANGES.iter().find(|(key, _)| *key == k).map(|(_, r)| *r)
+}
+
+/// Number `v` for key `k`, refused outside the key's range.
+pub(crate) fn number_in_range(cmd: &str, k: &str, v: &Value) -> Result<f64> {
+    let percent = matches!(v, Value::String(s) if s.trim().ends_with('%'));
+    let (x, (lo, hi), help) = match number_range(k) {
+        Some(NumberRange::Fraction) => {
+            (f64_of(v).map(|x| if percent { x / 100.0 } else { x }), (0.0, 1.0), "between 0 and 1 (or a percentage such as \"80%\")")
+        }
+        Some(NumberRange::NonNegative) => (f64_of(v).filter(|_| !percent), (0.0, f64::INFINITY), "a number, 0 or more"),
+        None => (f64_of(v), (f64::NEG_INFINITY, f64::INFINITY), "a number"),
+    };
+    x.filter(|x| (lo..=hi).contains(x)).ok_or_else(|| bad(cmd, format!("`{k}` must be {help}, not {v}")))
+}
+
+/// [`number_in_range`] for `n or [a,b,c,d]` keys.
+fn four_in_range(cmd: &str, k: &str, v: &Value, help: &str) -> Result<[f64; 4]> {
+    let r = four(v).ok_or_else(|| bad(cmd, help))?;
+    for x in r {
+        number_in_range(cmd, k, &json!(x))?;
+    }
+    Ok(r)
+}
+
+/// `x` brought into key `k`'s range, for values that come from inside the document (a bound
+/// variable) rather than from a caller.
+pub(crate) fn clamp_to_range(k: &str, x: f64) -> f64 {
+    match number_range(k) {
+        Some(NumberRange::Fraction) => x.clamp(0.0, 1.0),
+        Some(NumberRange::NonNegative) => x.max(0.0),
+        None => x,
+    }
+}
+
 /// Keys `node.set` understands (documented for agents).
-pub const KEYS: &str = "name, visible, locked, opacity (0-1), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), \
+pub const KEYS: &str = "name, visible, locked, opacity (0-1, or a percentage such as \"80%\"), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), \
 fills (paints or colours; gradients as {type: linearGradient|radialGradient|angularGradient|diamondGradient, stops: [\"#hex\", ...], from?, to?} too), fill (colour), strokes, stroke (colour), strokeWeight, strokeAlign (inside|center|outside), strokeSides [t,r,b,l], strokeTopWeight / strokeRightWeight / strokeBottomWeight / strokeLeftWeight (one side; turns on individual strokes), \
-strokeCap / startCap / endCap, strokeJoin, miterAngle (degrees: sharper joins bevel; or miterLimit as a ratio), dashes [..], widthProfile (preset uniform|wedge|taper|eye|rounded|pinch, [[t, scale], ...] or null), brush (preset id, {preset, spacing, sizeJitter, rotationJitter, scatter, seed} or null), cornerRadius (n or [tl,tr,br,bl]), cornerSmoothing (0-1), effects, \
+strokeCap / startCap / endCap, strokeJoin, miterAngle (degrees: sharper joins bevel; or miterLimit as a ratio), dashes [..], widthProfile (preset uniform|wedge|taper|eye|rounded|pinch, [[t, scale], ...] or null), brush (preset id, {preset, spacing, sizeJitter, rotationJitter, scatter, seed} or null), cornerRadius (n or [tl,tr,br,bl]), cornerSmoothing (0-1, or a percentage), effects, \
 clip, isMask, layout (null|horizontal|vertical|grid|{...}), gap, crossGap, padding (n or [t,r,b,l]), paddingTop/Right/Bottom/Left, \
 mainAlign (min|center|max, or the auto gaps spaceBetween|spaceAround|spaceEvenly), crossAlign (min|center|max|baseline: first text baselines, horizontal layouts), contentAlign (wrapped lines: auto = packed where crossAlign says | spaceBetween), wrap (rows of a horizontal layout, columns of a vertical one), strokesIncluded (the frame's inside stroke takes up space), reverseZ (canvas stacking: true = first on top), \
 columnGap / rowGap (aliases of gap / crossGap), gridColumns, gridRows, columnTracks / rowTracks ([120 | \"1fr\" | \"auto\" | {sizing, value}]), \
@@ -389,7 +454,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 doc.get_mut(id)?.transform = space.inverse() * Affine::new([c[0], c[1], c[2], c[3], tx, ty]);
             }
             "width" | "height" | "w" | "h" => {
-                let val = f64_of(v).ok_or_else(|| bad(cmd, format!("`{k}` must be a number")))?.max(0.0);
+                let val = number_in_range(cmd, k, v)?;
                 let is_w = k.starts_with('w');
                 // With the proportions locked (the Layout panel's link) and only one side set, the
                 // other side follows the node's ratio; both sides in one `node.set` stay as typed.
@@ -431,11 +496,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
             "name" => doc.get_mut(id)?.name = string_val(v).ok_or_else(|| bad(cmd, "`name` must be a string"))?,
             "visible" => doc.get_mut(id)?.visible = v.as_bool().ok_or_else(|| bad(cmd, "`visible` must be a boolean"))?,
             "locked" => doc.get_mut(id)?.locked = v.as_bool().ok_or_else(|| bad(cmd, "`locked` must be a boolean"))?,
-            "opacity" => {
-                let o = f64_of(v).ok_or_else(|| bad(cmd, "`opacity` must be a number"))?;
-                let o = if o > 1.0 { o / 100.0 } else { o };
-                doc.get_mut(id)?.opacity = o.clamp(0.0, 1.0) as f32;
-            }
+            "opacity" => doc.get_mut(id)?.opacity = number_in_range(cmd, k, v)? as f32,
             "blend" | "blendMode" => {
                 let b = v.as_str().and_then(figcraft_color::BlendMode::from_name).ok_or_else(|| bad(cmd, "unknown blend mode"))?;
                 doc.get_mut(id)?.blend = b;
@@ -450,14 +511,14 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 let c = color_of(v).ok_or_else(|| bad(cmd, "`stroke` must be a colour"))?;
                 doc.get_mut(id)?.strokes = vec![Paint::solid(c)];
             }
-            "strokeWeight" => doc.get_mut(id)?.stroke.weight = f64_of(v).ok_or_else(|| bad(cmd, "`strokeWeight` must be a number"))?.max(0.0),
+            "strokeWeight" => doc.get_mut(id)?.stroke.weight = number_in_range(cmd, k, v)?,
             "strokeAlign" => doc.get_mut(id)?.stroke.align = enum_of(v).ok_or_else(|| bad(cmd, "strokeAlign: inside|center|outside"))?,
             "strokeSides" => {
-                doc.get_mut(id)?.stroke.sides = if v.is_null() { None } else { Some(four(v).ok_or_else(|| bad(cmd, "strokeSides: [t,r,b,l]"))?) }
+                doc.get_mut(id)?.stroke.sides = if v.is_null() { None } else { Some(four_in_range(cmd, k, v, "strokeSides: [t,r,b,l]")?) }
             }
             "strokeTopWeight" | "strokeRightWeight" | "strokeBottomWeight" | "strokeLeftWeight" => {
                 let i = STROKE_SIDES.iter().position(|x| *x == k).unwrap_or(0);
-                let w = f64_of(v).ok_or_else(|| bad(cmd, format!("`{k}` must be a number")))?.max(0.0);
+                let w = number_in_range(cmd, k, v)?;
                 let st = &mut doc.get_mut(id)?.stroke;
                 // One side set on its own turns on individual strokes, the others at the weight.
                 let mut sides = st.sides.unwrap_or([st.weight; 4]);
@@ -487,7 +548,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
             "widthProfile" => doc.get_mut(id)?.stroke.width_profile = width_profile_of(v).ok_or_else(|| bad(cmd, WIDTH_PROFILE_HELP))?,
             "brush" | "strokeBrush" => doc.get_mut(id)?.stroke.brush = brush_of(v).ok_or_else(|| bad(cmd, BRUSH_HELP))?,
             "cornerRadius" => {
-                let r = four(v).ok_or_else(|| bad(cmd, "cornerRadius: n or [tl,tr,br,bl]"))?.map(|x| x.max(0.0));
+                let r = four_in_range(cmd, k, v, "cornerRadius: n or [tl,tr,br,bl]")?;
                 let n = doc.get_mut(id)?;
                 n.corners.radii = r;
                 // A vector's corner radius rounds every point (edit mode then sets them one by one).
@@ -498,12 +559,12 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
             }
             "topLeftRadius" | "topRightRadius" | "bottomRightRadius" | "bottomLeftRadius" => {
                 let i = ["topLeftRadius", "topRightRadius", "bottomRightRadius", "bottomLeftRadius"].iter().position(|x| *x == k).unwrap_or(0);
-                let r = f64_of(v).ok_or_else(|| bad(cmd, format!("`{k}` must be a number")))?.max(0.0);
+                let r = number_in_range(cmd, k, v)?;
                 if let Some(slot) = doc.get_mut(id)?.corners.radii.get_mut(i) {
                     *slot = r;
                 }
             }
-            "cornerSmoothing" => doc.get_mut(id)?.corners.smoothing = f64_of(v).unwrap_or(0.0).clamp(0.0, 1.0),
+            "cornerSmoothing" => doc.get_mut(id)?.corners.smoothing = number_in_range(cmd, k, v)?,
             "effects" => doc.get_mut(id)?.effects = serde_json::from_value(snake(v)).map_err(|e| bad(cmd, format!("effects: {e}")))?,
             "clip" | "clipsContent" => doc.get_mut(id)?.clip = v.as_bool().ok_or_else(|| bad(cmd, "`clip` must be a boolean"))?,
             "isMask" => doc.get_mut(id)?.is_mask = v.as_bool().unwrap_or(false),

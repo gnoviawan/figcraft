@@ -15,6 +15,7 @@ use figcraft_ui_egui::{ControlReply, FigApp};
 use js_sys::{Object, Reflect};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
+use wasm_bindgen_futures::JsFuture;
 
 use crate::host::{Answer, Code, Host, HostError};
 
@@ -89,6 +90,28 @@ fn page_hidden() -> bool {
     web_sys::window().and_then(|w| w.document()).is_some_and(|d| d.hidden())
 }
 
+/// Fetch every URL (all requests start at once) and read each body, or say why it has none.
+async fn fetch_all(urls: Vec<String>) -> Vec<(String, Result<Vec<u8>, String>)> {
+    let Some(window) = web_sys::window() else {
+        return urls.into_iter().map(|u| (u, Err("no window".into()))).collect();
+    };
+    let requests: Vec<(String, js_sys::Promise)> = urls.into_iter().map(|u| (u.clone(), window.fetch_with_str(&u))).collect();
+    let mut out = Vec::with_capacity(requests.len());
+    for (url, request) in requests {
+        out.push((url, fetch_bytes(request).await));
+    }
+    out
+}
+
+async fn fetch_bytes(request: js_sys::Promise) -> Result<Vec<u8>, String> {
+    let response: web_sys::Response = JsFuture::from(request).await.map_err(|e| format!("{e:?}"))?.dyn_into().map_err(|e| format!("{e:?}"))?;
+    if !response.ok() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let body = JsFuture::from(response.array_buffer().map_err(|e| format!("{e:?}"))?).await.map_err(|e| format!("{e:?}"))?;
+    Ok(js_sys::Uint8Array::new(&body).to_vec())
+}
+
 /// A `ui.*` request waiting for the frame that answers it.
 struct Pending {
     id: JsValue,
@@ -119,6 +142,14 @@ impl Embed {
         match self.host.call(fig, ctx, &method, &params, no_frames) {
             Answer::Now(result) => self.link.reply(&id, &mount_seq, result),
             Answer::Later(reply) => self.pending.push(Pending { id, mount_seq, reply }),
+            Answer::FetchFonts(urls) => {
+                let (link, ctx) = (self.link.clone(), ctx.clone());
+                wasm_bindgen_futures::spawn_local(async move {
+                    let result = crate::host::add_fallback_fonts(fetch_all(urls).await);
+                    ctx.request_repaint();
+                    link.reply(&id, &mount_seq, Ok(result));
+                });
+            }
         }
         self.report(fig);
     }

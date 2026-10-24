@@ -62,7 +62,10 @@ fn bad_references_fail_and_roll_back() {
     ] {
         let r = s.execute("command.batch", &json!({"commands": [frame, {"command": "node.set", "params": {"ids": [bad], "props": {"name": "x"}}}]}));
         match r {
-            Err(EngineError::BadParams { msg, .. }) => assert!(msg.contains(needle), "{msg} should mention {needle}"),
+            Err(EngineError::Step { step: 1, source, .. }) => match *source {
+                EngineError::BadParams { msg, .. } => assert!(msg.contains(needle), "{msg} should mention {needle}"),
+                other => panic!("expected BadParams for {bad}, got {other:?}"),
+            },
             other => panic!("expected BadParams for {bad}, got {other:?}"),
         }
         assert_eq!(s.doc().unwrap().node(s.page().unwrap()).unwrap().children.len(), before, "rolled back");
@@ -77,7 +80,7 @@ fn deep_params_are_refused_not_overflowed() {
         deep = json!([deep]);
     }
     let r = s.execute("command.batch", &json!({"commands": [{"command": "select.none", "params": {"x": deep}}]}));
-    assert!(matches!(r, Err(EngineError::BadParams { .. })));
+    assert!(matches!(&r, Err(EngineError::Step { step: 0, source, .. }) if matches!(**source, EngineError::BadParams { .. })), "{r:?}");
 }
 
 #[test]
