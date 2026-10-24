@@ -505,9 +505,14 @@ impl FontDb {
 
     /// [`add_bytes`](Self::add_bytes), and the faces' families become fallbacks for characters a
     /// text's own font lacks, whatever they are called (a web build has no system fonts, so the
-    /// page embedding it supplies some).
+    /// page embedding it supplies some). A file already loaded is not loaded again: its faces come
+    /// back as they are.
     pub fn add_fallback_bytes(&mut self, bytes: Vec<u8>) -> Vec<Arc<Face>> {
-        let added = self.add_bytes(bytes);
+        let loaded = self.faces.iter().find(|f| f.bytes.data() == bytes.as_slice()).map(|f| f.bytes.data().as_ptr());
+        let added = match loaded {
+            Some(data) => self.faces.iter().filter(|f| f.bytes.data().as_ptr() == data).cloned().collect(),
+            None => self.add_bytes(bytes),
+        };
         for face in &added {
             let key = face.family.to_lowercase();
             if !self.host_fallbacks.contains(&key) {
@@ -522,7 +527,7 @@ impl FontDb {
         self.host_fallbacks
             .iter()
             .filter(|k| !builtin.iter().any(|b| b.eq_ignore_ascii_case(k)))
-            .filter_map(|k| self.best(k, style))
+            .flat_map(|k| self.best_all(k, style))
             .filter(|f| f.has_color() == color)
             .collect()
     }
@@ -654,6 +659,16 @@ impl FontDb {
         faces.into_iter().min_by_key(|f| cost(f)).cloned()
     }
 
+    /// [`best`](Self::best), then every other face of `family` with its style: a family split over
+    /// several files (subsets) covers characters no one file has.
+    fn best_all(&self, family: &str, style: &str) -> Vec<Arc<Face>> {
+        let Some(best) = self.best(family, style) else { return vec![] };
+        let same = |f: &&Arc<Face>| !Arc::ptr_eq(f, &best) && f.style == best.style && f.weight == best.weight && f.italic == best.italic;
+        let idx = self.families.get(&family.to_lowercase()).map(|(_, idx)| idx.as_slice()).unwrap_or_default();
+        let rest: Vec<Arc<Face>> = idx.iter().filter_map(|i| self.faces.get(*i)).filter(same).cloned().collect();
+        std::iter::once(best).chain(rest).collect()
+    }
+
     /// The default face (Inter Regular if embedded, else any system sans).
     pub fn default_face(&mut self) -> Option<Arc<Face>> {
         for fam in ["Inter", "Helvetica Neue", "Helvetica", "Arial", "Segoe UI", "Roboto", "DejaVu Sans", "Liberation Sans", "Noto Sans"] {
@@ -674,9 +689,8 @@ impl FontDb {
     pub fn fallbacks_for(&mut self, style: &str) -> Vec<Arc<Face>> {
         let mut out = Vec::new();
         for fam in FALLBACK_FAMILIES {
-            if let Some(f) = self.find(fam, style) {
-                out.push(f);
-            }
+            self.load_family(fam, None);
+            out.extend(self.best_all(fam, style));
         }
         out.extend(self.host_fallbacks_for(style, &FALLBACK_FAMILIES, false));
         out
