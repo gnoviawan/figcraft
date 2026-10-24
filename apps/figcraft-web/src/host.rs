@@ -235,6 +235,7 @@ impl Host {
                 app.session.docs = vec![ds];
                 app.session.active = 0;
                 app.ui.home = false;
+                app.ui.host_location = None;
                 Ok(json!({"contentVersion": self.content_version(&app.session)}))
             }
             HostMethod::Snapshot => {

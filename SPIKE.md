@@ -68,7 +68,7 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
     and defaults to `dev`.
   - `host.file {name, path?, location?}` → `{contentVersion}` names the file the host keeps the
     document in. The host sends it after every `host.openDocument` and for a new document, since
-    a load replaces the name.
+    a load replaces the name and clears the path and location.
     - `name` becomes the document's name, so the header, the window title, `document.inspect` and
       `ui.inspect` show it, and the next snapshot saves it.
     - `path` is reported as the document's `path`. The editor never reads or writes it. Termul sends a
