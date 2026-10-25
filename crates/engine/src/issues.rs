@@ -83,8 +83,10 @@ pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
     };
     for id in doc.changed_ids(before, usize::MAX).unwrap_or_default() {
         let Some(n) = doc.node(id) else {
-            // Deleted: the layers that were above it no longer have it behind them.
-            if let Some(area) = before.world_bounds(id) {
+            // Deleted: the layers that were above it no longer have it behind them. Under a deleted
+            // parent they are gone too, and scanning them would cost a bulk delete O(n²).
+            let parent_gone = before.node(id).and_then(|o| o.parent).is_some_and(|p| doc.node(p).is_none());
+            if !parent_gone && let Some(area) = before.world_bounds(id) {
                 out.extend(stacked_on(before, id, area).into_iter().flat_map(|above| doc.subtree(above)));
             }
             continue;
@@ -108,7 +110,9 @@ pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
         if !(moved || painted || resized) {
             continue;
         }
-        if let Some(area) = doc.world_bounds(id) {
+        // Under a new parent every sibling is new and reports itself with its subtree.
+        let parent_new = n.parent.is_some_and(|p| before.node(p).is_none());
+        if !parent_new && let Some(area) = doc.world_bounds(id) {
             out.extend(stacked_on(doc, id, area).into_iter().flat_map(|above| doc.subtree(above)));
         }
     }
