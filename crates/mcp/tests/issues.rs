@@ -99,6 +99,19 @@ fn deleting_the_layer_under_the_text_reports_the_text_it_leaves_unreadable() {
 }
 
 #[test]
+fn moving_a_light_layer_under_the_text_reports_the_text() {
+    let mut c = Client::new();
+    let card = frame(&mut c, json!({"fill": "#111827"}));
+    let label = text(&mut c, &card, "White", json!({"fill": "#FFFFFF"}))["id"].clone();
+    let aside = c.create(json!({"type": "rectangle", "parent": card, "x": 300, "y": 120, "width": 80, "height": 60, "props": {"fill": "#FFFFFF"}}));
+    let cover = c.create(json!({"type": "rectangle", "parent": card, "x": 0, "y": 0, "width": 400, "height": 200, "props": {"fill": "#FFFFFF"}}));
+    let out = c.ok("run_command", json!({"command": "node.reorder", "params": {"id": cover, "index": 0}}));
+    assert_eq!(issues(&out), [("low_contrast".to_string(), label.clone())], "white text now on the white rectangle: {out}");
+    let apart = c.ok("run_command", json!({"command": "node.reorder", "params": {"id": aside, "index": 0}}));
+    assert!(apart.get("issues").is_none(), "a reorder reports only the layers whose stacking it changed: {apart}");
+}
+
+#[test]
 fn a_new_page_background_reports_the_text_on_the_page() {
     let mut c = Client::new();
     let on_page = c.ok("create_node", json!({"type": "text", "x": 0, "y": 0, "text": "Page", "props": {"fill": "#333333"}}));
