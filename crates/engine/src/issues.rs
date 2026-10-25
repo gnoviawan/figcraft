@@ -73,11 +73,28 @@ pub fn find(doc: &Document, ids: &BTreeSet<NodeId>) -> Vec<Issue> {
 /// The layers whose issues the edit from `before` to `doc` can have changed: each layer it added
 /// or changed (the layout's own moves and resizes included); everything inside a layer it added,
 /// moved, repainted, shrank or re-clipped; and the layers above one it added, moved, repainted or
-/// resized that overlap it, with their contents.
+/// resized that overlap it, or that overlapped one it deleted, with their contents; and every layer
+/// on a page whose background it changed.
 pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
+    let background = |n: &Node| match n.kind {
+        NodeKind::Page { background, .. } => Some(background),
+        _ => None,
+    };
     for id in doc.changed_ids(before, usize::MAX).unwrap_or_default() {
-        let Some(n) = doc.node(id).filter(|n| !n.is_page()) else { continue };
+        let Some(n) = doc.node(id) else {
+            // Deleted: the layers that were above it no longer have it behind them.
+            if let Some(area) = before.world_bounds(id) {
+                out.extend(stacked_on(before, id, area).into_iter().flat_map(|above| doc.subtree(above)));
+            }
+            continue;
+        };
+        if n.is_page() {
+            if before.node(id).is_some_and(|o| background(o) != background(n)) {
+                out.extend(doc.subtree(id));
+            }
+            continue;
+        }
         out.insert(id);
         let old = before.node(id);
         let moved = old.is_none_or(|o| o.parent != n.parent || o.transform != n.transform);
@@ -91,14 +108,17 @@ pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
         if !(moved || painted || resized) {
             continue;
         }
-        let (Some(area), Some(parent)) = (doc.world_bounds(id), n.parent.and_then(|p| doc.node(p))) else { continue };
-        for &above in parent.children.iter().skip_while(|c| **c != id).skip(1) {
-            if doc.world_bounds(above).is_some_and(|b| overlap(b, area)) {
-                out.extend(doc.subtree(above));
-            }
+        if let Some(area) = doc.world_bounds(id) {
+            out.extend(stacked_on(doc, id, area).into_iter().flat_map(|above| doc.subtree(above)));
         }
     }
     out
+}
+
+/// The siblings drawn above `id` in `doc` that overlap `area`.
+fn stacked_on(doc: &Document, id: NodeId, area: Rect) -> Vec<NodeId> {
+    let Some(parent) = doc.node(id).and_then(|n| n.parent).and_then(|p| doc.node(p)) else { return Vec::new() };
+    parent.children.iter().skip_while(|c| **c != id).skip(1).copied().filter(|&c| doc.world_bounds(c).is_some_and(|b| overlap(b, area))).collect()
 }
 
 fn shown(doc: &Document, n: &Node) -> bool {
@@ -251,7 +271,9 @@ fn clipped(doc: &Document, n: &Node) -> Option<String> {
     let clips = doc.ancestors(n.id).into_iter().filter_map(|a| doc.node(a)).filter(|a| a.clip && a.kind.is_frame_like());
     for (i, a) in clips.enumerate() {
         let Some(frame) = doc.world_bounds(a.id) else { continue };
-        let hidden = area.x0 >= frame.x1 - SLACK || area.x1 <= frame.x0 + SLACK || area.y0 >= frame.y1 - SLACK || area.y1 <= frame.y0 + SLACK;
+        // The slack is at most the layer's own size: a line has no height, so it hides only past the edge.
+        let (sx, sy) = (SLACK.min(area.width()), SLACK.min(area.height()));
+        let hidden = area.x0 >= frame.x1 - sx || area.x1 <= frame.x0 + sx || area.y0 >= frame.y1 - sy || area.y1 <= frame.y0 + sy;
         if hidden && (i == 0 || text) {
             return Some(format!(
                 "It lies outside “{}” ({}), which clips its content, so it doesn't show: move it inside, or turn off that frame's `clip`.",
