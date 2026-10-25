@@ -110,11 +110,45 @@ fn a_new_page_background_reports_the_text_on_the_page() {
 #[test]
 fn a_divider_on_a_clipping_frame_edge_is_not_clipped() {
     let mut c = Client::new();
-    let f = c.create(json!({"type": "frame", "width": 200, "height": 60, "props": {"fill": "#FFFFFF"}}));
-    let bottom = c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 59.5, "width": 200}));
-    assert!(bottom.get("issues").is_none(), "a line half a unit above the bottom edge draws: {bottom}");
-    let top = c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 0.5, "width": 200}));
-    assert!(top.get("issues").is_none(), "a line half a unit below the top edge draws: {top}");
+    let card = c.create(json!({"type": "frame", "width": 100, "height": 40, "props": {"fill": "#FFFFFF"}}));
+    let rule = |x: f64, y: f64, w: f64, h: f64| json!({"type": "rectangle", "parent": card, "x": x, "y": y, "width": w, "height": h, "props": {"fill": "#111111"}});
+    let line = |y: f64| json!({"type": "line", "parent": card, "x": 0, "y": y, "width": 100, "props": {"stroke": "#111111", "strokeWeight": 2}});
+    for (what, args) in [
+        ("a 1-unit rule on the top edge", rule(0.0, 0.0, 100.0, 1.0)),
+        ("a 1-unit rule on the bottom edge", rule(0.0, 39.0, 100.0, 1.0)),
+        ("a 1-unit bar on the left edge", rule(0.0, 0.0, 1.0, 40.0)),
+        ("a 1-unit bar on the right edge", rule(99.0, 0.0, 1.0, 40.0)),
+        ("a half-unit hairline on the top edge", rule(0.0, 0.0, 100.0, 0.5)),
+        ("a line half a unit below the top edge", line(0.5)),
+        ("a line on the top edge, half its stroke inside", line(0.0)),
+        ("a line on the bottom edge, half its stroke inside", line(40.0)),
+    ] {
+        let out = c.ok("create_node", args);
+        assert!(out.get("issues").is_none(), "{what} draws inside the frame: {out}");
+    }
+}
+
+#[test]
+fn dividers_at_the_ends_of_a_clipping_auto_layout_list_are_not_clipped() {
+    let mut c = Client::new();
+    let rule = |w: u32, h: u32| json!({"command": "node.create", "params": {"type": "rectangle", "parent": {"$step": 0}, "width": w, "height": h, "props": {"fill": "#E5E7EB"}}});
+    let list = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "params": {"type": "frame", "name": "List", "width": 368, "props": {"fill": "#FFFFFF", "layout": "vertical", "sizingV": "hug"}}},
+            rule(368, 1), rule(368, 40), rule(368, 1), rule(368, 40), rule(368, 1),
+        ]}),
+    );
+    assert_eq!(list.as_array().map(Vec::len), Some(6), "horizontal dividers first, between and last draw in full: {list}");
+    let row = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "params": {"type": "frame", "name": "Row", "x": 400, "height": 40, "props": {"fill": "#FFFFFF", "layout": "horizontal", "sizingH": "hug"}}},
+            rule(1, 40), rule(80, 40), rule(1, 40), rule(80, 40), rule(1, 40),
+        ]}),
+    );
+    assert_eq!(row.as_array().map(Vec::len), Some(6), "vertical dividers first, between and last draw in full: {row}");
+    assert_eq!(c.ok("list_issues", json!({})), json!({"issues": []}));
 }
 
 #[test]
@@ -136,6 +170,10 @@ fn a_shape_is_clipped_only_when_none_of_it_shows() {
     assert!(bleed.get("issues").is_none(), "a shape bleeding off the edge is a design choice: {bleed}");
     let lost = c.ok("create_node", json!({"type": "rectangle", "parent": f, "x": 500, "y": 0, "width": 50, "height": 50}));
     assert_eq!(issues(&lost), [("clipped".to_string(), lost["id"].clone())]);
+    let below = c.ok("create_node", json!({"type": "rectangle", "parent": f, "x": 0, "y": 200, "width": 400, "height": 1}));
+    assert_eq!(issues(&below), [("clipped".to_string(), below["id"].clone())], "a rule just past the bottom edge shows nothing");
+    let past = c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 201, "width": 400, "props": {"stroke": "#111111", "strokeWeight": 2}}));
+    assert_eq!(issues(&past), [("clipped".to_string(), past["id"].clone())], "its stroke ends on the edge");
     // A thumbnail that crops a larger picture hides parts of it on purpose.
     let thumb = c.create(json!({"type": "frame", "x": 600, "width": 64, "height": 64}));
     let picture = c.create(json!({"type": "frame", "parent": thumb, "x": -30, "width": 360, "height": 200}));
