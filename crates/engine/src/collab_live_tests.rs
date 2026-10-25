@@ -245,12 +245,13 @@ fn a_group_of_commands_syncs_as_one_step() {
     let mut room = Room::new(base(), 2, 3);
     let (f, r) = frame_and_rect(room.server.document());
     let start = room.server.replica().clone();
-    let cmds = vec![
-        ("node.set".to_string(), json!({"id": r, "props": {"name": "A"}})),
-        ("node.set".to_string(), json!({"id": f, "props": {"name": "B"}})),
-        ("shape.rectangle".to_string(), json!({"x": 0, "y": 0, "width": 5, "height": 5})),
-    ];
-    room.s(0).batch("Three", &cmds).unwrap();
+    let steps = crate::BatchStep::parse_all(&[
+        json!({"command": "node.set", "params": {"id": r, "props": {"name": "A"}}}),
+        json!({"command": "node.set", "params": {"id": f, "props": {"name": "B"}}}),
+        json!({"command": "shape.rectangle", "params": {"x": 0, "y": 0, "width": 5, "height": 5}}),
+    ])
+    .unwrap();
+    room.s(0).batch("Three", &steps).unwrap();
     room.pump();
     assert_eq!(room.people[0].up.len(), 1, "one batch");
     room.settle();

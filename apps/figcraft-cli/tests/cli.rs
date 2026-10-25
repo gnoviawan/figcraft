@@ -195,3 +195,29 @@ fn commands_json_lists_everything() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v.as_array().unwrap().len() > 200);
 }
+
+#[test]
+fn run_resolves_named_steps_like_command_batch() {
+    let d = tmp("named");
+    let script = d.join("s.json");
+    std::fs::write(
+        &script,
+        r#"[{"command":"node.create","as":"card","params":{"type":"frame","name":"Card","width":200,"height":100}},
+            {"command":"node.create","as":"title","params":{"type":"text","parent":{"$name":"card"},"text":"Hi"}}]"#,
+    )
+    .unwrap();
+    let out = bin().arg("run").arg(&script).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!((lines[0]["as"].as_str(), lines[1]["as"].as_str()), (Some("card"), Some("title")));
+    assert!(lines.iter().all(|l| l["ok"] == true), "{lines:?}");
+
+    let bad = d.join("bad.json");
+    std::fs::write(&bad, r#"[{"command":"node.create","params":{"type":"text","text":"Hi","parent":{"$name":"card"}}},{"command":"node.create","as":"card","params":{"type":"frame"}}]"#).unwrap();
+    let out = bin().arg("run").arg(&bad).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"ok\":false") && stdout.contains("earlier step"), "{stdout}");
+    std::fs::remove_dir_all(&d).ok();
+}

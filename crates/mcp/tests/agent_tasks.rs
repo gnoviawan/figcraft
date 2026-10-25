@@ -344,3 +344,62 @@ fn task_card_in_one_batch() {
     );
     assert!(e.contains("step 0") && e.contains("earlier step"), "{e}");
 }
+
+/// A hero section of ten layers that refer to each other by name: the result lists each name's id,
+/// and one undo takes the whole section away.
+#[test]
+fn task_section_with_named_steps() {
+    let mut c = Client::new();
+    let text = |name: &str, parent: &str, text: &str, size: u32| {
+        json!({"command": "node.create", "as": name, "params": {"type": "text", "name": name, "parent": {"$name": parent}, "text": text,
+            "props": {"fontSize": size, "sizingH": "fill", "textAutoResize": "height"}}})
+    };
+    let frame = |name: &str, parent: Option<&str>, props: Value| {
+        let mut params = json!({"type": "frame", "name": name, "props": props});
+        if let Some(parent) = parent {
+            params["parent"] = json!({"$name": parent});
+        }
+        json!({"command": "node.create", "as": name, "params": params})
+    };
+    let out = c.ok(
+        "batch",
+        json!({"label": "Hero", "commands": [
+            frame("hero", None, json!({"layout": "vertical", "width": 1200, "sizingV": "hug", "padding": 80, "gap": 24, "fill": "#FFF8F0"})),
+            text("eyebrow", "hero", "Fresh every morning", 14),
+            text("headline", "hero", "Bread from our oven to your table", 56),
+            text("subhead", "hero", "Sourdough, croissants and sweet rolls, baked before sunrise.", 20),
+            frame("actions", Some("hero"), json!({"layout": "horizontal", "gap": 12, "sizingH": "hug", "sizingV": "hug"})),
+            frame("primary", Some("actions"), json!({"layout": "horizontal", "padding": [14, 24, 14, 24], "sizingH": "hug", "sizingV": "hug", "fill": "#A8432A"})),
+            {"command": "node.create", "as": "primary-label", "params": {"type": "text", "parent": {"$name": "primary"}, "text": "Order now", "props": {"fill": "#FFFFFF"}}},
+            frame("secondary", Some("actions"), json!({"layout": "horizontal", "padding": [14, 24, 14, 24], "sizingH": "hug", "sizingV": "hug"})),
+            {"command": "node.create", "as": "secondary-label", "params": {"type": "text", "parent": {"$name": "secondary"}, "text": "See the menu"}},
+            {"command": "node.set", "params": {"ids": [{"$name": "secondary"}], "props": {"stroke": "#A8432A", "strokeWeight": 1}}},
+        ]}),
+    );
+    let results = ids(&out["results"]);
+    assert_eq!(results.len(), 10);
+    let names = out["names"].as_object().unwrap();
+    assert_eq!(names.len(), 9, "{names:?}");
+    assert_eq!(names["hero"], results[0]["id"]);
+    assert_eq!(names["secondary-label"], results[8]["id"]);
+    let hero = c.node(&names["hero"]);
+    assert_eq!(ids(&hero["children"]).len(), 4, "eyebrow, headline, subhead and actions are inside the hero");
+    let actions: Vec<Value> = ids(&c.node(&names["actions"])["children"]).iter().map(|n| n["id"].clone()).collect();
+    assert_eq!(actions, [names["primary"].clone(), names["secondary"].clone()]);
+    assert_eq!(c.node(&names["secondary"])["strokes"][0]["color"].as_str().map(str::to_ascii_uppercase).as_deref(), Some("#A8432A"));
+
+    assert_eq!(c.page_children().len(), 1);
+    c.ok("undo", json!({}));
+    assert!(c.page_children().is_empty(), "one undo removes the whole section");
+
+    let e = c.err(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame"}},
+            {"command": "node.create", "as": "label", "params": {"type": "text", "text": "Hi", "parent": {"$name": "cta"}}},
+            {"command": "node.create", "as": "cta", "params": {"type": "frame", "parent": {"$name": "card"}}},
+        ]}),
+    );
+    assert!(e.starts_with("step 1 \"label\" (node.create)") && e.contains("\"cta\"") && e.contains("earlier step"), "{e}");
+    assert!(c.page_children().is_empty(), "the failed batch rolled back");
+}
