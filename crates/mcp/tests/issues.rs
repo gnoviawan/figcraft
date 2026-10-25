@@ -191,6 +191,33 @@ fn batch_returns_results_and_issues_only_when_there_are_issues() {
 }
 
 #[test]
+fn a_named_batch_with_issues_returns_results_names_and_issues_side_by_side() {
+    let mut c = Client::new();
+    let out = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame", "name": "Card", "width": 240, "height": 60, "props": {"fill": "#FFFFFF"}}},
+            {"command": "node.create", "as": "faint", "params": {"type": "text", "parent": {"$name": "card"}, "x": 8, "y": 8, "text": "Faint", "props": {"fill": "#EEEEEE"}}},
+        ]}),
+    );
+    let mut keys: Vec<&str> = out.as_object().unwrap_or_else(|| panic!("an object: {out}")).keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["issues", "names", "results"], "{out}");
+    let results = out["results"].as_array().unwrap_or_else(|| panic!("results is the flat array: {out}"));
+    assert_eq!(results.len(), 2, "{out}");
+    assert_eq!(out["names"], json!({"card": results[0]["id"], "faint": results[1]["id"]}));
+    assert_eq!(issues(&out), [("low_contrast".to_string(), results[1]["id"].clone())]);
+
+    let clean = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame", "name": "Card", "x": 400, "width": 240, "height": 60, "props": {"fill": "#FFFFFF"}}},
+        ]}),
+    );
+    assert!(clean.get("issues").is_none() && clean["names"]["card"] == clean["results"][0]["id"], "names without issues: {clean}");
+}
+
+#[test]
 fn x_and_y_inside_auto_layout_are_a_warning() {
     let mut c = Client::new();
     let row = c.create(json!({"type": "frame", "width": 300, "height": 60, "props": {"layout": "horizontal"}}));

@@ -338,22 +338,24 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             ok()
         }),
-        spec!("command.batch", "Run several commands", "{label?, commands: [{command, params}]} (one undo step)", false, |s, p| {
-            let label = string(p, "label").unwrap_or_else(|| "Batch".into());
-            let cmds: Vec<(String, Value)> = match get(p, "commands") {
-                Some(Value::Array(a)) => {
-                    let mut out = Vec::new();
-                    for (i, c) in a.iter().enumerate() {
-                        let cmd =
-                            c.get("command").and_then(Value::as_str).ok_or_else(|| bad("command.batch", format!("step {i} has no `command`")))?;
-                        out.push((cmd.to_string(), c.get("params").cloned().unwrap_or(json!({}))));
-                    }
-                    out
-                }
-                _ => return Err(bad("command.batch", "`commands` must be an array")),
-            };
-            Ok(Value::Array(s.batch(&label, &cmds)?))
-        }),
+        spec!(
+            "command.batch",
+            "Run several commands",
+            "{label?, commands: [{command, params, as?}]} (one undo step; returns {results, names} when a step has `as`)",
+            false,
+            |s, p| {
+                let label = string(p, "label").unwrap_or_else(|| "Batch".into());
+                let Some(Value::Array(a)) = get(p, "commands") else { return Err(bad("command.batch", "`commands` must be an array")) };
+                let steps = crate::BatchStep::parse_all(a)?;
+                let results = s.batch(&label, &steps)?;
+                let names: serde_json::Map<String, Value> = steps
+                    .iter()
+                    .zip(&results)
+                    .filter_map(|(step, result)| Some((step.name.clone()?, result.get("id").cloned().unwrap_or(Value::Null))))
+                    .collect();
+                Ok(if names.is_empty() { Value::Array(results) } else { json!({"results": results, "names": names}) })
+            }
+        ),
         spec!("edit.repeat", "Repeat last command", "{}", true, |s, _| {
             let Some((id, p)) = s.last_command.clone().filter(|(id, _)| id != "edit.repeat") else {
                 return Err(EngineError::Disabled("edit.repeat".into(), "nothing to repeat".into()));

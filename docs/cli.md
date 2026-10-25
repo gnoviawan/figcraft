@@ -105,13 +105,14 @@ Runs commands in a headless session (a new document, or `--in`), printing one JS
 
 The whole script is **one undo step**, and it is **all-or-nothing**, exactly like running the same
 commands through `command.batch` (the MCP tool `batch`, the control channel, plugins): `{"$step": n}`
-in a step's params is the `id` in an earlier step's result, so a step can target a layer an earlier
-step of the same script created:
+in a step's params is the `id` in an earlier step's result, and `{"$name": "…"}` the `id` in the
+result of the earlier step named with `"as"`, so a step can target a layer an earlier step of the
+same script created. A named step's result lines carry its `"as"`:
 
 ```json
 [
-  {"command": "node.create", "params": {"type": "frame", "name": "Card", "width": 200, "height": 100}},
-  {"command": "node.create", "params": {"type": "text", "parent": {"$step": 0}, "text": "Hi"}}
+  {"command": "node.create", "as": "card", "params": {"type": "frame", "name": "Card", "width": 200, "height": 100}},
+  {"command": "node.create", "params": {"type": "text", "parent": {"$name": "card"}, "text": "Hi"}}
 ]
 ```
 

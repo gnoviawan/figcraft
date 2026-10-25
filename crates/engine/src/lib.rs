@@ -96,10 +96,10 @@ pub enum EngineError {
     /// A bug: the command panicked. The document was rolled back.
     #[error("internal error in `{cmd}`: {msg} (the document was left as it was before; please report this bug)")]
     Internal { cmd: String, msg: String },
-    /// Step `step` of a `command.batch` failed. `command` is the step's command id and, when its
-    /// params give one, the layer name: `node.create "Card"`.
-    #[error("step {step} ({command}): {source}")]
-    Step { step: usize, command: String, source: Box<EngineError> },
+    /// Step `step` of a `command.batch` failed. `name` is the step's `as`, and `command` is its
+    /// command id and, when its params give one, the layer name: `step 3 "title" (node.create "Title")`.
+    #[error("step {step}{} ({command}): {source}", .name.as_ref().map(|name| format!(" {name:?}")).unwrap_or_default())]
+    Step { step: usize, name: Option<String>, command: String, source: Box<EngineError> },
 }
 
 impl From<figcraft_doc::DocError> for EngineError {
@@ -117,54 +117,124 @@ pub fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.to_string(), msg: msg.into() }
 }
 
-/// `e`, the error batch step `step` (`cmd` with `params`) failed with, wrapped to name the step.
+/// `e`, the error batch step `step` failed with, wrapped to name the step.
 /// [`EngineError::Waiting`] passes through as it is: the background runner reruns the batch on it.
-fn step_error(e: EngineError, step: usize, cmd: &str, params: &Value) -> EngineError {
+fn step_error(e: EngineError, step: usize, s: &BatchStep) -> EngineError {
     if matches!(e, EngineError::Waiting) {
         return e;
     }
-    let command = match params.get("name").and_then(Value::as_str) {
-        Some(name) => format!("{cmd} {name:?}"),
-        None => cmd.to_string(),
+    let command = match s.params.get("name").and_then(Value::as_str) {
+        Some(name) => format!("{} {name:?}", s.command),
+        None => s.command.clone(),
     };
-    EngineError::Step { step, command, source: Box::new(e) }
+    EngineError::Step { step, name: s.name.clone(), command, source: Box::new(e) }
+}
+
+/// One step of a batch: a command, its params, and the name (`as`) later steps refer to it by.
+#[derive(Clone, Debug)]
+pub struct BatchStep {
+    pub command: String,
+    pub params: Value,
+    pub name: Option<String>,
+}
+
+impl BatchStep {
+    /// Steps from `[{command, params?, as?}]`. A name must be a non-empty string, and no two steps
+    /// may share one, so a batch that breaks either rule fails before any step runs.
+    pub fn parse_all(steps: &[Value]) -> Result<Vec<BatchStep>> {
+        let mut out: Vec<BatchStep> = Vec::with_capacity(steps.len());
+        for (i, c) in steps.iter().enumerate() {
+            let command = c.get("command").and_then(Value::as_str).ok_or_else(|| bad("command.batch", format!("step {i} has no `command`")))?;
+            let params = match c.get("params") {
+                None | Some(Value::Null) => json!({}),
+                Some(p) => p.clone(),
+            };
+            let mut step = BatchStep { command: command.to_string(), params, name: None };
+            match c.get("as") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(name)) if !name.is_empty() => {
+                    step.name = Some(name.clone());
+                    if let Some(first) = out.iter().position(|s| s.name.as_deref() == Some(name)) {
+                        let msg = format!("step {first} is already named {name:?}; each `as` name may name one step of a batch");
+                        return Err(step_error(bad("command.batch", msg), i, &step));
+                    }
+                }
+                Some(_) => return Err(step_error(bad("command.batch", "`as` must be a non-empty string"), i, &step)),
+            }
+            out.push(step);
+        }
+        Ok(out)
+    }
 }
 
 /// Deepest params nesting `resolve_step_refs` walks before giving up.
 const STEP_REF_MAX_DEPTH: usize = 64;
 
-/// Replace every `{"$step": n}` / `{"$step": n, "field": "…"}` in `v` with that field (default
-/// `id`) of `results[n]`, the result of an earlier batch step.
-fn resolve_step_refs(v: &Value, results: &[Value], step: usize, depth: usize) -> Result<Value> {
+/// Replace every `{"$step": n}` and `{"$name": "…"}` in `v` (each optionally with `"field": "…"`)
+/// with that field (default `id`) of the result of an earlier step of `steps`. `results` holds the
+/// results of the steps before this one.
+fn resolve_step_refs(v: &Value, steps: &[BatchStep], results: &[Value], depth: usize) -> Result<Value> {
     if depth > STEP_REF_MAX_DEPTH {
         return Err(bad("command.batch", format!("params nest deeper than {STEP_REF_MAX_DEPTH} levels")));
     }
     match v {
-        Value::Object(o) if o.contains_key("$step") => {
-            if let Some(k) = o.keys().find(|k| *k != "$step" && *k != "field") {
-                return Err(bad("command.batch", format!("a `$step` reference takes only `field`, not `{k}`")));
+        Value::Object(o) if o.contains_key("$step") || o.contains_key("$name") => {
+            let key = if o.contains_key("$step") { "$step" } else { "$name" };
+            if let Some(k) = o.keys().find(|k| *k != key && *k != "field") {
+                return Err(bad("command.batch", format!("a `{key}` reference takes only `field`, not `{k}`")));
             }
-            let n = o.get("$step").and_then(Value::as_u64).ok_or_else(|| bad("command.batch", "`$step` must be a step index (0, 1, …)"))?;
             let field = match o.get("field") {
                 None => "id",
                 Some(Value::String(f)) => f.as_str(),
                 Some(_) => return Err(bad("command.batch", "`field` must be a string")),
             };
-            let Some(result) = usize::try_from(n).ok().and_then(|n| results.get(n)) else {
+            let (n, what) = match o.get("$step") {
+                Some(n) => {
+                    let n = n.as_u64().ok_or_else(|| bad("command.batch", "`$step` must be a step index (0, 1, …)"))?;
+                    (usize::try_from(n).unwrap_or(usize::MAX), format!("`$step` {n}"))
+                }
+                None => {
+                    let name = o
+                        .get("$name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| bad("command.batch", "`$name` must be the `as` name of an earlier step"))?;
+                    let n = steps
+                        .iter()
+                        .position(|s| s.name.as_deref() == Some(name))
+                        .ok_or_else(|| bad("command.batch", unknown_step_name(name, steps)))?;
+                    (n, format!("`$name` {name:?} (step {n})"))
+                }
+            };
+            let Some(result) = results.get(n) else {
+                let step = results.len();
                 let range = if step == 0 { "there is none before step 0".to_string() } else { format!("0 to {}", step - 1) };
-                return Err(bad("command.batch", format!("`$step` {n} must be an earlier step ({range})")));
+                return Err(bad("command.batch", format!("{what} must be an earlier step ({range})")));
             };
             result.get(field).cloned().ok_or_else(|| bad("command.batch", format!("step {n}'s result has no `{field}`")))
         }
         Value::Object(o) => {
             let mut out = serde_json::Map::with_capacity(o.len());
             for (k, x) in o {
-                out.insert(k.clone(), resolve_step_refs(x, results, step, depth + 1)?);
+                out.insert(k.clone(), resolve_step_refs(x, steps, results, depth + 1)?);
             }
             Ok(Value::Object(out))
         }
-        Value::Array(a) => a.iter().map(|x| resolve_step_refs(x, results, step, depth + 1)).collect::<Result<Vec<_>>>().map(Value::Array),
+        Value::Array(a) => a.iter().map(|x| resolve_step_refs(x, steps, results, depth + 1)).collect::<Result<Vec<_>>>().map(Value::Array),
         _ => Ok(v.clone()),
+    }
+}
+
+fn unknown_step_name(name: &str, steps: &[BatchStep]) -> String {
+    const LISTED: usize = 20;
+    let mut names: Vec<String> = steps.iter().filter_map(|s| s.name.as_ref()).take(LISTED + 1).map(|n| format!("{n:?}")).collect();
+    if names.len() > LISTED {
+        names.truncate(LISTED);
+        names.push("…".into());
+    }
+    if names.is_empty() {
+        format!("no step has `as` {name:?}; no step of this batch has a name")
+    } else {
+        format!("no step has `as` {name:?}; the names in this batch are {}", names.join(", "))
     }
 }
 
@@ -1211,28 +1281,31 @@ impl Session {
     }
 
     /// Run several commands as one undo step. A param value `{"$step": n}` is replaced by the `id`
-    /// in the result of the earlier step `n` (`{"$step": n, "field": "…"}` picks another field),
-    /// so a step can target a layer that an earlier step of the same batch created. Any object
-    /// with a `$step` key in a step's params is such a reference, except inside a nested
-    /// `command.batch` step: its references are to its own steps.
-    pub fn batch(&mut self, label: &str, cmds: &[(String, Value)]) -> Result<Vec<Value>> {
+    /// in the result of the earlier step `n`, and `{"$name": "…"}` by the `id` in the result of the
+    /// earlier step whose `as` is that name (`"field": "…"` picks another field), so a step can
+    /// target a layer that an earlier step of the same batch created. Any object with a `$step` or
+    /// `$name` key in a step's params is such a reference, except inside a nested `command.batch`
+    /// step: its references are to its own steps.
+    pub fn batch(&mut self, label: &str, steps: &[BatchStep]) -> Result<Vec<Value>> {
         self.grouped(label, |s| {
-            let mut results: Vec<Value> = Vec::with_capacity(cmds.len());
-            for (step, (id, p)) in cmds.iter().enumerate() {
-                let v = s.batch_step(&results, step, id, p).map_err(|e| step_error(e, step, id, p))?;
+            let mut results: Vec<Value> = Vec::with_capacity(steps.len());
+            for (i, step) in steps.iter().enumerate() {
+                let v = s.batch_step(steps, &results).map_err(|e| step_error(e, i, step))?;
                 results.push(v);
             }
             Ok(results)
         })
     }
 
-    /// One step of a batch: `{"$step": n}` in `params` resolves against `results` (the results of
-    /// the steps before it), then the command runs. [`Session::batch`] runs a list of these as one
-    /// undo step; a caller with its own list — the CLI's script runner — uses this so its steps
-    /// resolve `$step` the same way, inside its own [`Session::grouped`].
-    pub fn batch_step(&mut self, results: &[Value], step: usize, cmd: &str, params: &Value) -> Result<Value> {
-        let p = if cmd == "command.batch" { params.clone() } else { resolve_step_refs(params, results, step, 0)? };
-        self.execute(cmd, &p)
+    /// The next step of a batch, `steps[results.len()]`: its `$step` and `$name` references resolve
+    /// against `results` (the results of the steps before it), then the command runs.
+    /// [`Session::batch`] runs a list of these as one undo step; a caller with its own list — the
+    /// CLI's script runner — uses this so its steps resolve the same way, inside its own
+    /// [`Session::grouped`].
+    pub fn batch_step(&mut self, steps: &[BatchStep], results: &[Value]) -> Result<Value> {
+        let step = steps.get(results.len()).ok_or_else(|| bad("command.batch", "every step has run"))?;
+        let p = if step.command == "command.batch" { step.params.clone() } else { resolve_step_refs(&step.params, steps, results, 0)? };
+        self.execute(&step.command, &p)
     }
 
     /// Run `f` as one undo step called `label`: the commands it executes push no steps of their

@@ -286,7 +286,7 @@ Or in a project's `.mcp.json`:
 |---|---|
 | `list_commands {filter?}` | Every command: id, label, menu, shortcut, undoable, params doc. |
 | `run_command {command, params}` | Run any command (e.g. `align.left`, `layout.add`, `component.create`, `instance.place` (drop an instance at a page point into the frame or auto layout slot under it), `component.exposeInstance` / `instance.exposed` (nested instance properties on instances), `component.makeSlot` / `instance.slotInsert` / `instance.resetSlot` (slots, below), `inspect.code` (CSS, HTML + CSS for a whole frame, React, Leptos, SwiftUI or Jetpack Compose for a layer; components take their properties as parameters and instances are calls, see Dev Mode below), `inspect.properties` (layout, auto layout, typography, fills, strokes and effects with their style and variable names; `colorFormat`: hex, rgb, css, hsl or hsb), `inspect.assets` (layers under the selection with export settings, icons and images, each with its `kind`), `inspect.code` takes `unit: rem` and `rootFontSize` for CSS, HTML, React and Leptos, `style.create`, `variable.bind`, `variable.update` (rename, describe, scope), `variable.set` with `{alias}`, `variable.renameMode` / `variable.removeMode`, `variable.deleteCollection`, `proto.interaction.add`, `codeConnect.set` (components linked to real code, see Dev Mode below)). |
-| `batch {commands: [{command, params}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. A step can use what an earlier step returned: `{"$step": n}` anywhere in its params becomes the `id` in step n's result (zero-based), and `{"$step": n, "field": "…"}` another field of it (see Step references below). |
+| `batch {commands: [{command, params, as?}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. A step can use what an earlier step returned: `{"$name": "…"}` anywhere in its params becomes the `id` in the result of the earlier step with that `as` name, `{"$step": n}` the `id` in step n's result (zero-based), and either with `"field": "…"` another field of it (see Step references below). With a named step or a layout issue the result is `{results, names?, issues?}`; otherwise the array of results. |
 | `create_node {type, x, y, width, height, parent, index, name, text, path, props}` | Create a frame, rectangle, ellipse, polygon, star, line, arrow, text, vector, section, component or slice; returns `{id, node}`. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
 | `list_issues {ids?}` | The layout issues of the layers and everything inside them, by default the whole current page (`doc.issues`): `{issues: [{id, name, kind, message}]}`. See Layout issues below. |
@@ -1630,27 +1630,45 @@ Align and distribute as one undo step:
 
 ### Step references
 
-A step in a `batch` can use what an earlier step returned. `{"$step": n}` anywhere in a step's
-params (a value, an item in `ids`, a nested field) is replaced by the `id` in the result of step `n`
-(zero-based) before the step runs; `{"$step": n, "field": "name"}` takes another field of that
-result. This builds a nested tree in one call and one undo step, without guessing ids:
+A step in a `batch` can use what an earlier step returned. Give a step a name with `"as": "…"`;
+`{"$name": "…"}` anywhere in a later step's params (a value, an item in `ids`, a nested field) is
+replaced by the `id` in that step's result before the later step runs. `{"$step": n}` does the same
+for step `n` (zero-based), and either takes `"field": "…"` for another field of the result. This
+builds a nested tree in one call and one undo step, without guessing ids:
 
 ```json
 {"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"batch","arguments":{"label":"Card","commands":[
-  {"command":"node.create","params":{"type":"frame","name":"Card","props":{"layout":"vertical","gap":12}}},
-  {"command":"node.create","params":{"type":"text","parent":{"$step":0},"text":"Ada Lovelace"}},
-  {"command":"node.create","params":{"type":"frame","parent":{"$step":0},"name":"Button"}},
-  {"command":"node.create","params":{"type":"text","parent":{"$step":2},"text":"Follow"}}]}}}
+  {"command":"node.create","as":"card","params":{"type":"frame","name":"Card","props":{"layout":"vertical","gap":12}}},
+  {"command":"node.create","params":{"type":"text","parent":{"$name":"card"},"text":"Ada Lovelace"}},
+  {"command":"node.create","as":"button","params":{"type":"frame","parent":{"$name":"card"},"name":"Button"}},
+  {"command":"node.create","params":{"type":"text","parent":{"$name":"button"},"text":"Follow"}}]}}}
 ```
 
-A reference to the same or a later step, a negative or non-integer index, a missing `field` or any
-other key next to `$step` fails the whole batch, which is rolled back. So does any step that fails,
-and the error starts with the step's index and command, and the `name` in its params if it has one:
-``step 35 (node.create "Placeholder"): invalid parameters for `node.create`: …``. Only an object whose keys are
-`$step` (and optionally `field`) is a reference: text such as `"$step 0"` is left as written. The
-`$step` key is reserved in step params: an object holding it anywhere (in plugin data or a variable
-value too) is read as a reference. A step that is itself a `command.batch` is passed on as written,
-so the references in its steps are to its own steps, not the outer batch's.
+When any step has a name, the result is `{"results": [...], "names": {"button": 4, "card": 2}}`: the
+step results in order, and the `id` in each named step's result (`null` when its result has none).
+Without names it is the plain array of results, as before. A batch that leaves a layout issue adds
+`issues` to the same object (see Layout issues below).
+
+The rules:
+
+- A name is a non-empty string and names one step of the batch. A second step with the same name
+  fails the batch before any step runs, and the error names the step that used it first.
+- A name is only a handle inside the batch. It does not set or match a layer's `name`, and a name
+  no step refers to is fine: it is still listed in `names`.
+- A reference can point only at an earlier step. `{"$name": "…"}` for a name that a later step (or
+  the same step) defines, or that no step defines, fails the batch; the error says which step has
+  that name, or lists the names the batch has.
+- `$name` and `$step` mix freely: a named step is still step `n`.
+
+A negative or non-integer index, a missing `field` or any other key next to `$step` or `$name`
+fails the whole batch, which is rolled back. So does any step that fails, and the error starts with
+the step's index, its `as` name, its command and the `name` in its params, when it has them:
+``step 3 "hero-title" (node.create "Hero Title"): invalid parameters for `node.create`: …``. Only an
+object whose keys are `$step` or `$name` (and optionally `field`) is a reference: text such as
+`"$step 0"` is left as written. The `$step` and `$name` keys are reserved in step params: an object
+holding one anywhere (in plugin data or a variable value too) is read as a reference. A step that is
+itself a `command.batch` is passed on as written, so the references and names in its steps are its
+own, not the outer batch's.
 
 ### Layout issues
 
@@ -1658,7 +1676,7 @@ After `create_node`, `set_properties`, `run_command` and `batch`, the result lis
 in the layers the call touched, so the agent can fix it in its next call. Each issue is `{id, name,
 kind, message}`; the message says what to change. `create_node`, `set_properties` and an object
 result of `run_command` gain an `issues` key (only when there are some); `batch` returns
-`{"results": [...], "issues": [...]}` instead of its array, and another `run_command` result comes
+`{"results": [...], "issues": [...]}` instead of its array (plus `names` when a step is named), and another `run_command` result comes
 back as `{"result": …, "issues": [...]}`.
 
 | Kind | When |

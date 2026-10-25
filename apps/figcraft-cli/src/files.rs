@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use figcraft_doc::{Document, ExportFormat, ExportSetting, NodeId, NodeKind, PrintSettings};
-use figcraft_engine::Session;
+use figcraft_engine::{BatchStep, Session};
 use serde_json::{Value, json};
 
 use crate::{CliError, CliResult};
@@ -302,7 +302,7 @@ pub fn render(file: &str, out: &str, scale: f64, page: Option<&str>) -> CliResul
 }
 
 /// Parse a script: a JSON array of steps, `{"commands": [...]}`, or JSON lines.
-pub fn parse_script(text: &str) -> Result<Vec<(String, Value)>, String> {
+pub fn parse_script(text: &str) -> Result<Vec<BatchStep>, String> {
     let steps: Vec<Value> = match serde_json::from_str::<Value>(text) {
         Ok(Value::Array(a)) => a,
         Ok(Value::Object(o)) if o.contains_key("commands") => {
@@ -317,19 +317,13 @@ pub fn parse_script(text: &str) -> Result<Vec<(String, Value)>, String> {
             .map(|(i, l)| serde_json::from_str::<Value>(l).map_err(|e| format!("line {}: {e}", i + 1)))
             .collect::<Result<_, _>>()?,
     };
-    steps
-        .into_iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let cmd = s.get("command").and_then(Value::as_str).ok_or_else(|| format!("step {i}: `command` (a string) is required"))?;
-            let params = match s.get("params") {
-                None | Some(Value::Null) => json!({}),
-                Some(p @ Value::Object(_)) => p.clone(),
-                Some(_) => return Err(format!("step {i} ({cmd}): `params` must be an object")),
-            };
-            Ok((cmd.to_string(), params))
-        })
-        .collect()
+    for (i, s) in steps.iter().enumerate() {
+        let cmd = s.get("command").and_then(Value::as_str).ok_or_else(|| format!("step {i}: `command` (a string) is required"))?;
+        if !matches!(s.get("params"), None | Some(Value::Null | Value::Object(_))) {
+            return Err(format!("step {i} ({cmd}): `params` must be an object"));
+        }
+    }
+    BatchStep::parse_all(&steps).map_err(|e| e.to_string())
 }
 
 pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliResult<ExitCode> {
@@ -344,31 +338,41 @@ pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliRe
         None => Session::new(),
     };
     // One undo step and all-or-nothing, the way the same commands behave through `command.batch`
-    // (MCP, the control channel, plugins): `{"$step": n}` resolves against the steps before it, and
-    // a step that fails takes the whole script back instead of leaving the earlier steps applied.
+    // (MCP, the control channel, plugins): `{"$step": n}` and `{"$name": "…"}` resolve against the
+    // steps before them, and a step that fails takes the whole script back instead of leaving the
+    // earlier steps applied.
     // The result lines are held back until the script is through, so none of them reports work that
     // was rolled back.
     let mut results: Vec<Value> = Vec::with_capacity(steps.len());
     let mut failed_at = 0;
     let outcome = s.grouped(&format!("run {script}"), |s| {
-        for (i, (cmd, params)) in steps.iter().enumerate() {
+        for i in 0..steps.len() {
             failed_at = i;
-            let v = s.batch_step(&results, i, cmd, params)?;
+            let v = s.batch_step(&steps, &results)?;
             s.ui_requests.clear();
             results.push(v);
         }
         Ok(())
     });
     if let Err(e) = outcome {
-        let cmd = steps.get(failed_at).map_or("", |(cmd, _)| cmd.as_str());
         let i = failed_at;
-        println!("{}", json!({"step": i, "command": cmd, "ok": false, "error": e.to_string(), "rolledBack": true}));
-        eprintln!("error: step {i} ({cmd}) failed: {e}");
+        let (cmd, name) = steps.get(i).map_or(("", None), |s| (s.command.as_str(), s.name.as_deref()));
+        let mut line = json!({"step": i, "command": cmd, "ok": false, "error": e.to_string(), "rolledBack": true});
+        if let Some(name) = name {
+            line["as"] = json!(name);
+        }
+        println!("{line}");
+        let named = name.map(|name| format!(" {name:?}")).unwrap_or_default();
+        eprintln!("error: step {i}{named} ({cmd}) failed: {e}");
         eprintln!("the script's document changes were rolled back");
         return Ok(ExitCode::from(1));
     }
-    for (i, ((cmd, _), v)) in steps.iter().zip(&results).enumerate() {
-        println!("{}", json!({"step": i, "command": cmd, "ok": true, "result": v}));
+    for (i, (step, v)) in steps.iter().zip(&results).enumerate() {
+        let mut line = json!({"step": i, "command": step.command, "ok": true, "result": v});
+        if let Some(name) = &step.name {
+            line["as"] = json!(name);
+        }
+        println!("{line}");
     }
     if let Some(out) = out {
         let ds = s.ds().map_err(|e| CliError::Failed(e.to_string()))?;

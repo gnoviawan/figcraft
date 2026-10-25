@@ -64,3 +64,20 @@ fn the_issue_1424_batch_builds_with_its_composer_references_fixed() {
     assert_eq!(composer.children, [id(35), id(36), id(37)]);
     assert_eq!(doc.node(id(38)).unwrap().parent, Some(id(37)));
 }
+
+#[test]
+fn a_failing_named_step_is_named_by_its_as_and_its_layer_name() {
+    let mut s = Session::new();
+    let err = s
+        .execute(
+            "command.batch",
+            &json!({"commands": [
+                {"command": "node.create", "params": {"type": "frame", "width": 10, "height": 10}, "as": "hero"},
+                {"command": "node.create", "params": {"type": "text", "name": "Hero Title", "parent": {"$name": "hero"}, "text": "Hi", "props": {"sizingH": "fill"}}, "as": "hero-title"}
+            ]}),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("step 1 \"hero-title\" (node.create \"Hero Title\"): "), "{err}");
+    assert!(err.contains("Fill needs an auto layout parent"), "{err}");
+}
