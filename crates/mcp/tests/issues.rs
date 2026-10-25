@@ -172,8 +172,8 @@ fn a_shape_is_clipped_only_when_none_of_it_shows() {
     assert_eq!(issues(&lost), [("clipped".to_string(), lost["id"].clone())]);
     let below = c.ok("create_node", json!({"type": "rectangle", "parent": f, "x": 0, "y": 200, "width": 400, "height": 1}));
     assert_eq!(issues(&below), [("clipped".to_string(), below["id"].clone())], "a rule just past the bottom edge shows nothing");
-    let past = c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 201, "width": 400, "props": {"stroke": "#111111", "strokeWeight": 2}}));
-    assert_eq!(issues(&past), [("clipped".to_string(), past["id"].clone())], "its stroke ends on the edge");
+    let past = c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 220, "width": 400, "props": {"stroke": "#111111", "strokeWeight": 2}}));
+    assert_eq!(issues(&past), [("clipped".to_string(), past["id"].clone())], "a line below the frame, stroke and all");
     // A thumbnail that crops a larger picture hides parts of it on purpose.
     let thumb = c.create(json!({"type": "frame", "x": 600, "width": 64, "height": 64}));
     let picture = c.create(json!({"type": "frame", "parent": thumb, "x": -30, "width": 360, "height": 200}));
@@ -186,6 +186,9 @@ fn a_frame_with_no_size_is_collapsed() {
     let mut c = Client::new();
     let empty = c.ok("create_node", json!({"type": "frame", "props": {"layout": "vertical", "sizingH": "hug", "sizingV": "hug"}}));
     assert_eq!(issues(&empty), [("collapsed".to_string(), empty["id"].clone())]);
+    let list = c.create(json!({"type": "frame", "x": 300, "width": 200, "height": 100, "props": {"layout": "vertical"}}));
+    let slot = c.ok("create_node", json!({"type": "frame", "parent": list, "props": {"layout": "vertical", "sizingH": "hug", "sizingV": "hug"}}));
+    assert_eq!(issues(&slot), [("collapsed".to_string(), slot["id"].clone())], "an empty slot on the list's top edge is not outside it");
     let line = c.ok("create_node", json!({"type": "line", "x": 0, "y": 300, "width": 200}));
     assert!(line.get("issues").is_none(), "a line has no height by nature: {line}");
 }

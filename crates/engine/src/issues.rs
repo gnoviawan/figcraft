@@ -134,6 +134,13 @@ fn overlap(a: Rect, b: Rect) -> bool {
     a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
 }
 
+/// Whether nothing `paint` covers shows inside `frame`. A layer with no thickness that lies on an
+/// edge (an empty hug frame) is not outside, so it isn't reported as hidden on top of collapsed.
+fn outside(paint: Rect, frame: Rect) -> bool {
+    let beyond = |lo: f64, hi: f64, f0: f64, f1: f64| (hi <= f0 && lo < f0) || (lo >= f1 && hi > f1);
+    beyond(paint.x0, paint.x1, frame.x0, frame.x1) || beyond(paint.y0, paint.y1, frame.y0, frame.y1)
+}
+
 fn covers(outer: Rect, inner: Rect) -> bool {
     outer.x0 <= inner.x0 && outer.y0 <= inner.y0 && outer.x1 >= inner.x1 && outer.y1 >= inner.y1
 }
@@ -271,14 +278,12 @@ fn low_contrast(doc: &Document, n: &Node) -> Option<String> {
 /// a thumbnail), so only text counts there.
 fn clipped(doc: &Document, n: &Node) -> Option<String> {
     let area = doc.world_bounds(n.id)?;
+    let paint = n.own_paint_bounds(doc.world_transform(n.id));
     let text = matches!(n.kind, NodeKind::Text(_));
     let clips = doc.ancestors(n.id).into_iter().filter_map(|a| doc.node(a)).filter(|a| a.clip && a.kind.is_frame_like());
     for (i, a) in clips.enumerate() {
         let Some(frame) = doc.world_bounds(a.id) else { continue };
-        // The slack is at most the layer's own size: a line has no height, so it hides only past the edge.
-        let (sx, sy) = (SLACK.min(area.width()), SLACK.min(area.height()));
-        let hidden = area.x0 >= frame.x1 - sx || area.x1 <= frame.x0 + sx || area.y0 >= frame.y1 - sy || area.y1 <= frame.y0 + sy;
-        if hidden && (i == 0 || text) {
+        if outside(paint, frame) && (i == 0 || text) {
             return Some(format!(
                 "It lies outside “{}” ({}), which clips its content, so it doesn't show: move it inside, or turn off that frame's `clip`.",
                 a.name, a.id.0
