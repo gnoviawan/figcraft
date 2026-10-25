@@ -185,7 +185,8 @@ fn a_shape_is_clipped_only_when_none_of_it_shows() {
     assert_eq!(issues(&lost), [("clipped".to_string(), lost["id"].clone())]);
     let below = c.ok("create_node", json!({"type": "rectangle", "parent": f, "x": 0, "y": 200, "width": 400, "height": 1}));
     assert_eq!(issues(&below), [("clipped".to_string(), below["id"].clone())], "a rule just past the bottom edge shows nothing");
-    let past = c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 220, "width": 400, "props": {"stroke": "#111111", "strokeWeight": 2}}));
+    let past =
+        c.ok("create_node", json!({"type": "line", "parent": f, "x": 0, "y": 220, "width": 400, "props": {"stroke": "#111111", "strokeWeight": 2}}));
     assert_eq!(issues(&past), [("clipped".to_string(), past["id"].clone())], "a line below the frame, stroke and all");
     // A thumbnail that crops a larger picture hides parts of it on purpose.
     let thumb = c.create(json!({"type": "frame", "x": 600, "width": 64, "height": 64}));

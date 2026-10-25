@@ -5,7 +5,7 @@
 //! (`engine.execute` with `issues: true`, see [`Session::execute_checked`](crate::Session::execute_checked))
 //! and on demand with `doc.issues`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use figcraft_color::{Color, Paint};
 use figcraft_doc::{Document, Node, NodeId, NodeKind, TextStyle, style_weight};
@@ -73,8 +73,9 @@ pub fn find(doc: &Document, ids: &BTreeSet<NodeId>) -> Vec<Issue> {
 /// The layers whose issues the edit from `before` to `doc` can have changed: each layer it added
 /// or changed (the layout's own moves and resizes included); everything inside a layer it added,
 /// moved, repainted, shrank or re-clipped; and the layers above one it added, moved, repainted or
-/// resized that overlap it, or that overlapped one it deleted, with their contents; and every layer
-/// on a page whose background it changed.
+/// resized that overlap it, or that overlapped one it deleted, with their contents; the overlapping
+/// layers a reorder drew the other way round, with their contents; and every layer on a page whose
+/// background it changed.
 pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
     let mut out = BTreeSet::new();
     let background = |n: &Node| match n.kind {
@@ -91,14 +92,19 @@ pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
             }
             continue;
         };
+        let old = before.node(id);
+        if let Some(o) = old
+            && o.children != n.children
+        {
+            out.extend(restacked(doc, o, n).into_iter().flat_map(|c| doc.subtree(c)));
+        }
         if n.is_page() {
-            if before.node(id).is_some_and(|o| background(o) != background(n)) {
+            if old.is_some_and(|o| background(o) != background(n)) {
                 out.extend(doc.subtree(id));
             }
             continue;
         }
         out.insert(id);
-        let old = before.node(id);
         let moved = old.is_none_or(|o| o.parent != n.parent || o.transform != n.transform);
         let painted = old.is_none_or(|o| o.fills != n.fills || o.opacity != n.opacity || o.visible != n.visible);
         let shrank = old.is_some_and(|o| n.width < o.width || n.height < o.height);
@@ -123,6 +129,26 @@ pub fn touched(doc: &Document, before: &Document) -> BTreeSet<NodeId> {
 fn stacked_on(doc: &Document, id: NodeId, area: Rect) -> Vec<NodeId> {
     let Some(parent) = doc.node(id).and_then(|n| n.parent).and_then(|p| doc.node(p)) else { return Vec::new() };
     parent.children.iter().skip_while(|c| **c != id).skip(1).copied().filter(|&c| doc.world_bounds(c).is_some_and(|b| overlap(b, area))).collect()
+}
+
+/// The children of `n` that overlap a sibling and now stack the other way round against it than in `old`.
+fn restacked(doc: &Document, old: &Node, n: &Node) -> BTreeSet<NodeId> {
+    let was: HashMap<NodeId, usize> = old.children.iter().enumerate().map(|(i, c)| (*c, i)).collect();
+    let kept: Vec<(NodeId, usize)> = n.children.iter().filter_map(|c| Some((*c, *was.get(c)?))).collect();
+    let mut out = BTreeSet::new();
+    // Adding or deleting layers keeps the others in order, and that is the common case.
+    if kept.windows(2).all(|w| w[0].1 < w[1].1) {
+        return out;
+    }
+    let bounds: Vec<Option<Rect>> = kept.iter().map(|(c, _)| doc.world_bounds(*c)).collect();
+    for (i, &(below, was_below)) in kept.iter().enumerate() {
+        for (j, &(above, was_above)) in kept.iter().enumerate().skip(i + 1) {
+            if was_below > was_above && bounds[i].zip(bounds[j]).is_some_and(|(a, b)| overlap(a, b)) {
+                out.extend([below, above]);
+            }
+        }
+    }
+    out
 }
 
 fn shown(doc: &Document, n: &Node) -> bool {
