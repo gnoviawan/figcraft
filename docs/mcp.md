@@ -277,6 +277,8 @@ Or in a project's `.mcp.json`:
   document as it was.
 - Programmatic calls never open dialogs.
 - Verify your work: `inspect_document` / `get_node` for numbers, `screenshot` for pixels.
+- `create_node`, `set_properties`, `run_command` and `batch` report the layout issues of the layers
+  they touched as `issues` (see Layout issues below); `list_issues` reports them for any layers.
 
 ## Tools
 
@@ -287,6 +289,7 @@ Or in a project's `.mcp.json`:
 | `batch {commands: [{command, params}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. A step can use what an earlier step returned: `{"$step": n}` anywhere in its params becomes the `id` in step n's result (zero-based), and `{"$step": n, "field": "…"}` another field of it (see Step references below). |
 | `create_node {type, x, y, width, height, parent, index, name, text, path, props}` | Create a frame, rectangle, ellipse, polygon, star, line, arrow, text, vector, section, component or slice; returns `{id, node}`. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
+| `list_issues {ids?}` | The layout issues of the layers and everything inside them, by default the whole current page (`doc.issues`): `{issues: [{id, name, kind, message}]}`. See Layout issues below. |
 | `inspect_document {depth, allPages}` | The document as JSON (layer tree, styles, selection, history). |
 | `get_node {id, depth}` | One layer as JSON. |
 | `select {ids}` | Replace the selection (`[]` deselects). |
@@ -1648,6 +1651,39 @@ and the error starts with the step's index and command, and the `name` in its pa
 `$step` key is reserved in step params: an object holding it anywhere (in plugin data or a variable
 value too) is read as a reference. A step that is itself a `command.batch` is passed on as written,
 so the references in its steps are to its own steps, not the outer batch's.
+
+### Layout issues
+
+After `create_node`, `set_properties`, `run_command` and `batch`, the result lists what looks wrong
+in the layers the call touched, so the agent can fix it in its next call. Each issue is `{id, name,
+kind, message}`; the message says what to change. `create_node`, `set_properties` and an object
+result of `run_command` gain an `issues` key (only when there are some); `batch` returns
+`{"results": [...], "issues": [...]}` instead of its array, and another `run_command` result comes
+back as `{"result": …, "issues": [...]}`.
+
+| Kind | When |
+|---|---|
+| `invisible_text` | Text whose characters have no visible fill. |
+| `low_contrast` | Text below WCAG AA contrast with what is behind it: 4.5:1, or 3:1 from 24 px (18.66 px bold). |
+| `clipped` | Text a clipping frame cuts off by more than 1 unit, or a layer the nearest clipping frame around it hides entirely (a frame further out may crop on purpose, like a thumbnail of a larger picture). |
+| `collapsed` | A frame, section or text less than 1 unit wide or tall. |
+| `missing_glyph` | Characters no available font draws (they show as boxes). |
+
+The background of a text layer is what its lower siblings, its parent, their lower siblings and so
+on out to the page paint behind its box, down to the first opaque colour. A layer the text is in
+or over with no fill lets the next one show through. When that can't be told (a gradient or an
+image, a layer that isn't a box or covers only part of the text), contrast isn't checked. Hidden
+layers and layers inside hidden ones have no issues; a frame with `clip: false` cuts nothing, and
+a shape bleeding off a frame's edge is not an issue until none of it shows.
+
+"Touched" means each layer the call added or changed, the layout's own moves and resizes included;
+everything inside a layer it added, moved, repainted, shrank or re-clipped; and the layers above
+one it added, moved, repainted or resized that overlap it. A touched layer is reported as it is
+after the call, even when the issue was there before; issues on layers the call didn't touch are
+not repeated. `list_issues` (engine `doc.issues {ids?}`) runs the same checks on any layers.
+
+How the input was read stays in `warnings`, as before: an `x` or `y` on a layer auto layout places
+is ignored with a warning, and `sizingH`/`sizingV: "fill"` without an auto-layout parent is refused.
 
 The end-to-end tests in `crates/mcp/tests/agent_tasks.rs` are worked examples of realistic tasks
 (auto layout, a card built in one batch with step references, components and overrides, gradients

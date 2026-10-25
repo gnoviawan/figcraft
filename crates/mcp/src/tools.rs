@@ -89,6 +89,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "batch",
     "create_node",
     "set_properties",
+    "list_issues",
     "inspect_document",
     "get_node",
     "select",
@@ -118,7 +119,7 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "run_command",
             "Run command",
-            "Execute one FigCraft command by id with JSON params (ids and params from list_commands). Mutating commands are one undo step each; a failing command leaves the document unchanged. Examples: {\"command\":\"align.left\",\"params\":{\"ids\":[3,4]}}, {\"command\":\"layout.add\",\"params\":{\"ids\":[2],\"direction\":\"vertical\"}}, {\"command\":\"style.create\",\"params\":{\"type\":\"paint\",\"name\":\"Brand/Primary\",\"from\":5}}. Returns the command's result (creation commands return {\"id\"}). Programmatic calls never open dialogs.",
+            "Execute one FigCraft command by id with JSON params (ids and params from list_commands). Mutating commands are one undo step each; a failing command leaves the document unchanged. Examples: {\"command\":\"align.left\",\"params\":{\"ids\":[3,4]}}, {\"command\":\"layout.add\",\"params\":{\"ids\":[2],\"direction\":\"vertical\"}}, {\"command\":\"style.create\",\"params\":{\"type\":\"paint\",\"name\":\"Brand/Primary\",\"from\":5}}. Returns the command's result (creation commands return {\"id\"}); when a layer it touched has a layout problem (see list_issues), the result also has `issues` (a result that is not an object comes back as {\"result\", \"issues\"}). Programmatic calls never open dialogs.",
             obj(
                 json!({"command": string("Command id, e.g. node.create, align.left, component.create, file.export"), "params": {"type": "object", "description": "Command parameters (see list_commands)"}}),
                 &["command"],
@@ -128,7 +129,7 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "batch",
             "Run commands as one step",
-            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error names the failing step. Returns an array of the results in order. A later step can use a layer an earlier step created: anywhere in its params, {\"$step\": n} stands for the `id` in step n's result (zero-based; {\"$step\": n, \"field\": \"…\"} picks another field). Example: [{\"command\":\"node.create\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$step\":0}}}] builds a frame and a text inside it in one call.",
+            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error names the failing step. Returns an array of the results in order, or {\"results\": [...], \"issues\": [...]} when a layer the batch touched has a layout problem (see list_issues). A later step can use a layer an earlier step created: anywhere in its params, {\"$step\": n} stands for the `id` in step n's result (zero-based; {\"$step\": n, \"field\": \"…\"} picks another field). Example: [{\"command\":\"node.create\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$step\":0}}}] builds a frame and a text inside it in one call.",
             obj(
                 json!({
                     "commands": {"type": "array", "minItems": 1, "description": "Steps to run", "items": obj(json!({"command": string("Command id"), "params": {"type": "object"}}), &["command"])},
@@ -141,7 +142,7 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "create_node",
             "Create layer",
-            "Create a layer (engine `node.create`) and return its id and inspected properties. Coordinates are page units, y down; x/y are relative to the parent frame (the page when there is none, so then they are page coordinates; groups don't count). Inside an auto-layout frame the position is decided by the layout. The new layer becomes the selection. A text layer whose fontFamily isn't installed, or whose fontStyle the family lacks, gets `warnings` naming the face it draws in.",
+            "Create a layer (engine `node.create`) and return its id and inspected properties. Coordinates are page units, y down; x/y are relative to the parent frame (the page when there is none, so then they are page coordinates; groups don't count). Inside an auto-layout frame the position is decided by the layout (an x or y given there is ignored, with a warning). The new layer becomes the selection. When the new layer, or a layer it affects, has a layout problem (see list_issues), the result has `issues`. A text layer whose fontFamily isn't installed, or whose fontStyle the family lacks, gets `warnings` naming the face it draws in.",
             obj(
                 json!({
                     "type": {"type": "string", "enum": ["frame", "rectangle", "ellipse", "polygon", "star", "line", "arrow", "text", "vector", "section", "component", "slice"], "description": "Layer type"},
@@ -163,12 +164,19 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "set_properties",
             "Set properties",
-            "Set properties on one or more layers as one undo step (engine `node.set`). Keys: name, visible, locked, opacity (0-1, or a percentage such as \"80%\"), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), fill (colour) / fills (array of paints: \"#hex\" or {\"type\":\"solid\",\"color\":\"#hex\"} or {\"type\":\"linearGradient\",\"stops\":[\"#hex\",\"#hex\"]} or stops [{\"position\":0..1,\"color\":\"#hex\"}], optional from/to handles in the unit box; radialGradient too), stroke / strokes, strokeWeight, strokeAlign (inside|center|outside), cornerRadius (n or [tl,tr,br,bl]), effects (array, e.g. {\"type\":\"dropShadow\",\"color\":\"#00000040\",\"offset\":[0,4],\"radius\":8}), clip, layout (null|horizontal|vertical|grid), gap, padding (n or [t,r,b,l]), mainAlign (min|center|max|spaceBetween|spaceAround|spaceEvenly), crossAlign, wrap, contentAlign (auto|spaceBetween: wrapped lines), sizingH / sizingV (fixed|hug|fill), constraints {horizontal, vertical}, characters, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textAlign, textAutoResize. Auto layout keys (gap, padding, mainAlign, crossAlign, wrap, …) apply to frames, components and instances only: other layers among the ids are skipped and named in `warnings`, and with none that can take them the call is an error. A fontStyle draws in the family's nearest face, and a family that isn't installed in the default font; `warnings` says so when that face isn't the one named (another family, weight or slant). Run list_commands with filter \"node.set\" for the full list. Unknown keys are an error. Returns the updated layers.",
+            "Set properties on one or more layers as one undo step (engine `node.set`). Keys: name, visible, locked, opacity (0-1, or a percentage such as \"80%\"), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), fill (colour) / fills (array of paints: \"#hex\" or {\"type\":\"solid\",\"color\":\"#hex\"} or {\"type\":\"linearGradient\",\"stops\":[\"#hex\",\"#hex\"]} or stops [{\"position\":0..1,\"color\":\"#hex\"}], optional from/to handles in the unit box; radialGradient too), stroke / strokes, strokeWeight, strokeAlign (inside|center|outside), cornerRadius (n or [tl,tr,br,bl]), effects (array, e.g. {\"type\":\"dropShadow\",\"color\":\"#00000040\",\"offset\":[0,4],\"radius\":8}), clip, layout (null|horizontal|vertical|grid), gap, padding (n or [t,r,b,l]), mainAlign (min|center|max|spaceBetween|spaceAround|spaceEvenly), crossAlign, wrap, contentAlign (auto|spaceBetween: wrapped lines), sizingH / sizingV (fixed|hug|fill), constraints {horizontal, vertical}, characters, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textAlign, textAutoResize. Auto layout keys (gap, padding, mainAlign, crossAlign, wrap, …) apply to frames, components and instances only: other layers among the ids are skipped and named in `warnings`, and with none that can take them the call is an error. A fontStyle draws in the family's nearest face, and a family that isn't installed in the default font; `warnings` says so when that face isn't the one named (another family, weight or slant). Run list_commands with filter \"node.set\" for the full list. Unknown keys are an error. An x or y on a layer auto layout places is ignored, with a warning. Returns the updated layers, and `issues` when a layer it touched has a layout problem (see list_issues).",
             obj(
                 json!({"ids": ids_schema("Layer ids (default: the selection)"), "props": {"type": "object", "description": "Property values to set"}}),
                 &["props"],
             ),
             false,
+        ),
+        tool(
+            "list_issues",
+            "List layout issues",
+            "The layout issues on the given layers and everything inside them (default: the whole current page), as {\"issues\": [{id, name, kind, message}]}. These are the checks create_node, set_properties, run_command and batch run on the layers they touch: invisible_text (text with no visible fill), low_contrast (text below WCAG AA contrast with what is behind it: 4.5:1, or 3:1 from 24 px or 18.66 px bold), clipped (text a clipping frame cuts off, or a layer the nearest clipping frame around it hides entirely), collapsed (a frame, section or text under 1 unit wide or tall), missing_glyph (characters no available font draws). Each message says what to change.",
+            obj(json!({"ids": ids_schema("Layers to check, with their contents (default: the current page)")}), &[]),
+            true,
         ),
         tool(
             "inspect_document",
@@ -311,6 +319,37 @@ fn exec(b: &mut dyn Backend, cmd: &str, params: Value) -> Result<Value, String> 
     b.call("engine.execute", json!({"command": cmd, "params": params}))
 }
 
+/// [`exec`], plus the layout issues on the layers the command touched (`engine.execute` with
+/// `issues: true`). A backend that doesn't list them answers with the bare result.
+fn exec_checked(b: &mut dyn Backend, cmd: &str, params: Value) -> Result<(Value, Vec<Value>), String> {
+    let r = b.call("engine.execute", json!({"command": cmd, "params": params, "issues": true}))?;
+    Ok(match r {
+        Value::Object(mut o) if o.contains_key("result") && o.get("issues").is_some_and(Value::is_array) => {
+            let issues = match o.remove("issues") {
+                Some(Value::Array(list)) => list,
+                _ => Vec::new(),
+            };
+            (o.remove("result").unwrap_or(Value::Null), issues)
+        }
+        other => (other, Vec::new()),
+    })
+}
+
+/// `out` with its `issues`, when there are any: a key of an object result, else beside the result
+/// as `{wrap: out, issues}`.
+fn with_issues(out: Value, wrap: &str, issues: Vec<Value>) -> Value {
+    if issues.is_empty() {
+        return out;
+    }
+    match out {
+        Value::Object(mut o) => {
+            o.insert("issues".into(), Value::Array(issues));
+            Value::Object(o)
+        }
+        other => json!({wrap: other, "issues": issues}),
+    }
+}
+
 fn args_obj(args: &Value) -> Result<Map<String, Value>, String> {
     match args {
         Value::Object(o) => Ok(o.clone()),
@@ -409,6 +448,7 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         "batch" => batch(b, &a),
         "create_node" => create_node(b, &a),
         "set_properties" => set_properties(b, &a),
+        "list_issues" => list_issues(b, &a),
         "inspect_document" => inspect_document(b, &a),
         "get_node" => get_node(b, &a),
         "select" => select(b, &a),
@@ -479,7 +519,8 @@ fn run_command(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult
     };
     let mut params = params;
     friendly_params(&mut params);
-    exec(b, cmd, params).map(|v| ToolResult::json(&v))
+    let (out, issues) = exec_checked(b, cmd, params)?;
+    Ok(ToolResult::json(&with_issues(out, "result", issues)))
 }
 
 fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
@@ -500,7 +541,8 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Stri
         steps.push(json!({"command": cmd, "params": params}));
     }
     let label = s_arg(a, "label")?.unwrap_or("Batch");
-    exec(b, "command.batch", json!({"label": label, "commands": steps})).map(|v| ToolResult::json(&v))
+    let (results, issues) = exec_checked(b, "command.batch", json!({"label": label, "commands": steps}))?;
+    Ok(ToolResult::json(&with_issues(results, "results", issues)))
 }
 
 fn create_node(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
@@ -523,14 +565,14 @@ fn create_node(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult
     if let Some(Value::Object(p)) = params.get_mut("props") {
         normalize_props(p);
     }
-    let r = exec(b, "node.create", Value::Object(params))?;
+    let (r, issues) = exec_checked(b, "node.create", Value::Object(params))?;
     let id = r.get("id").cloned().ok_or("node.create returned no id")?;
     let node = b.call("node.get", json!({"id": id, "depth": 0}))?;
     let mut out = json!({"id": id, "node": node});
     if let Some(w) = r.get("warnings") {
         out["warnings"] = w.clone();
     }
-    Ok(ToolResult::json(&out))
+    Ok(ToolResult::json(&with_issues(out, "result", issues)))
 }
 
 fn set_properties(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
@@ -548,7 +590,8 @@ fn set_properties(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolRes
         }
         params["ids"] = json!(ids);
     }
-    let warnings = exec(b, "node.set", params)?.get("warnings").cloned();
+    let (r, issues) = exec_checked(b, "node.set", params)?;
+    let warnings = r.get("warnings").cloned();
     let ids = match ids {
         Some(i) => i,
         None => b
@@ -563,7 +606,15 @@ fn set_properties(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolRes
     if let Some(w) = warnings {
         out["warnings"] = w;
     }
-    Ok(ToolResult::json(&out))
+    Ok(ToolResult::json(&with_issues(out, "result", issues)))
+}
+
+fn list_issues(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
+    let params = match ids_arg(a, "ids")? {
+        Some(ids) => json!({"ids": ids}),
+        None => json!({}),
+    };
+    exec(b, "doc.issues", params).map(|v| ToolResult::json(&v))
 }
 
 fn inspect_document(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {

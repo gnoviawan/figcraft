@@ -106,6 +106,16 @@ can create a frame and fill it:
 {"id":4,"method":"engine.execute","params":{"command":"command.batch","params":{"commands":[{"command":"node.create","params":{"type":"frame","width":200,"height":100}},{"command":"node.create","params":{"type":"rectangle","parent":{"$step":0},"width":20,"height":20}}]}}}
 ```
 
+With `issues: true` next to `command`, the reply is `{"result": …, "issues": [...]}`: the
+command's result and the layout issues of the layers it touched (`[]` when it changed nothing; the
+kinds and the touched layers are described under Layout issues in `docs/mcp.md`). The MCP tools
+send it on every mutating call.
+
+```json
+{"id":5,"method":"engine.execute","params":{"command":"node.create","params":{"type":"text","text":"Hi","props":{"fills":[]}},"issues":true}}
+{"id":5,"ok":true,"result":{"result":{"id":4},"issues":[{"id":4,"name":"Hi","kind":"invisible_text","message":"Its text has no visible fill, so it doesn't show: set `fill` to a colour that stands out from its background."}]}}
+```
+
 ### `engine.commands {}`
 
 Every command: `[{id, label, params, menu, shortcut, undoable}]`.

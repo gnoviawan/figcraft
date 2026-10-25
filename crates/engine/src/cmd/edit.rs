@@ -210,6 +210,13 @@ pub fn specs() -> Vec<CommandSpec> {
             let i = req_id("node.get", p, "id")?;
             Ok(crate::inspect::node_json(s.doc()?, i, 1))
         }),
+        spec!(
+            "doc.issues",
+            "Find layout issues",
+            "{ids? (default: the current page)}  layout issues on the layers and everything inside them: text with no visible fill or too little contrast with its background, text a clipping frame cuts off, layers the nearest clipping frame hides entirely, frames or text with no size, characters no font draws. Returns {issues: [{id, name, kind, message}]}",
+            false,
+            find_issues
+        ),
         spec!("node.reparent", "Move layer into", "{ids?, parent, index?}", true, reparent),
         spec!("node.reorder", "Reorder layer", "{id, index}", true, |s, p| {
             let i = req_id("node.reorder", p, "id")?;
@@ -1128,6 +1135,14 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"matches": hits}))
 }
 
+fn find_issues(s: &mut Session, p: &Value) -> Result<Value> {
+    let named = ["ids", "id"].iter().any(|k| get(p, k).is_some_and(|v| !v.is_null()));
+    let roots = if named { req_targets("doc.issues", s, p)? } else { vec![s.page()?] };
+    let doc = s.doc()?;
+    let ids = roots.iter().flat_map(|r| doc.subtree(*r)).collect();
+    Ok(json!({"issues": crate::issues::find(doc, &ids)}))
+}
+
 fn set(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = req_targets("node.set", s, p)?;
     let props = match get(p, "props") {
@@ -1187,6 +1202,9 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         super::props::apply("node.set", doc, i, props)?;
     }
     warnings.extend(super::props::font_warnings(doc, &ids, &props));
+    if props.contains_key("x") || props.contains_key("y") {
+        warnings.extend(super::props::layout_position_warning(doc, &ids));
+    }
     if let Some(o) = pivot {
         for (i, q) in pinned {
             let d = o - doc.world_transform(i) * q;
