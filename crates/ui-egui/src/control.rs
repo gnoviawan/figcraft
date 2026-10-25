@@ -238,7 +238,12 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
         "engine.execute" => {
             let cmd = p.get("command").and_then(Value::as_str).ok_or("`command` required")?;
             let params = p.get("params").cloned().unwrap_or(json!({}));
-            let r = app.session.execute(cmd, &params).map_err(|e| e.to_string());
+            let r = if b(p, "issues") {
+                app.session.execute_checked(cmd, &params).map(|(result, issues)| json!({"result": result, "issues": issues}))
+            } else {
+                app.session.execute(cmd, &params)
+            }
+            .map_err(|e| e.to_string());
             // Programmatic calls never open dialogs.
             app.session.ui_requests.retain(|u| !u.kind.starts_with("dialog."));
             app.handle_ui_requests();

@@ -55,9 +55,13 @@ impl Headless {
     }
 
     fn execute(&mut self, cmd: &str, params: &Value) -> Result<Value, String> {
+        self.run(|s| s.execute(cmd, params))
+    }
+
+    fn run(&mut self, f: impl FnOnce(&mut Session) -> figcraft_engine::Result<Value>) -> Result<Value, String> {
         // What happened in a live session since the last call (latest presence only).
         self.session.live_poll();
-        let r = self.session.execute(cmd, params).map_err(|e| e.to_string());
+        let r = f(&mut self.session).map_err(|e| e.to_string());
         self.session.live_sync();
         // No UI: dialogs and panels requested by commands are dropped.
         self.session.ui_requests.clear();
@@ -243,7 +247,11 @@ impl Backend for Headless {
                     None | Some(Value::Null) => json!({}),
                     Some(v) => v.clone(),
                 };
-                self.execute(&cmd, &params)
+                if b(&p, "issues") {
+                    self.run(|s| s.execute_checked(&cmd, &params).map(|(result, issues)| json!({"result": result, "issues": issues})))
+                } else {
+                    self.execute(&cmd, &params)
+                }
             }
             "engine.commands" => Ok(Value::Array(
                 figcraft_engine::all_commands().iter().map(|c| json!({"id": c.id, "label": c.label, "params": c.params, "menu": c.menu(), "shortcut": c.shortcut(), "undoable": c.history})).collect(),

@@ -32,6 +32,7 @@ pub mod guard;
 pub mod guides;
 pub mod inspect;
 pub mod invite_links;
+pub mod issues;
 pub mod keymap;
 pub mod library;
 pub mod library_server;
@@ -1029,6 +1030,18 @@ impl Session {
             }
         }
         result
+    }
+
+    /// [`execute`](Self::execute), then the layout issues on the layers it touched in the active
+    /// document ([`issues::touched`]); none when it left that document as it was.
+    pub fn execute_checked(&mut self, id: &str, params: &Value) -> Result<(Value, Vec<issues::Issue>)> {
+        let before = self.ds().ok().map(|d| (d.uid, d.doc.clone()));
+        let result = self.execute(id, params)?;
+        let found = match (before, self.ds()) {
+            (Some((uid, was)), Ok(ds)) if ds.uid == uid && !Arc::ptr_eq(&was, &ds.doc) => issues::find(&ds.doc, &issues::touched(&ds.doc, &was)),
+            _ => Vec::new(),
+        };
+        Ok((result, found))
     }
 
     /// A version shown in place of the document is read-only: refuse an edit (it is rolled back).

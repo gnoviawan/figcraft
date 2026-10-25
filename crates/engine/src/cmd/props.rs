@@ -422,6 +422,23 @@ pub fn font_warnings(doc: &Document, ids: &[NodeId], props: &Map<String, Value>)
         .collect()
 }
 
+/// The warning for an `x` or `y` given to layers among `ids` that auto layout places: the layout
+/// moves them back.
+pub fn layout_position_warning(doc: &Document, ids: &[NodeId]) -> Option<String> {
+    let flows =
+        |n: &&Node| !n.child_layout.absolute && n.parent.and_then(|p| doc.node(p)).is_some_and(|p| p.layout.is_some() && p.kind.is_frame_like());
+    let placed: Vec<&Node> = ids.iter().filter_map(|i| doc.node(*i)).filter(flows).collect();
+    if placed.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = placed.iter().take(10).map(|n| format!("{} “{}”", n.id, n.name)).collect();
+    let more = if placed.len() > names.len() { format!(" and {} more", placed.len() - names.len()) } else { String::new() };
+    Some(format!(
+        "`x`/`y` ignored on {}{more}: auto layout places it in its parent; leave them out, or set `absolute: true` to place it yourself",
+        names.join(", ")
+    ))
+}
+
 /// Apply a property map to one node. `x`/`y` are relative to the parent.
 pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Value>) -> Result<()> {
     let mut unknown = Vec::new();

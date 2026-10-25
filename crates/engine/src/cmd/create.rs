@@ -262,6 +262,10 @@ pub fn create(s: &mut Session, p: &Value) -> Result<Value> {
         super::props::apply(cmd, doc, nid, props)?;
         warnings = super::props::font_warnings(doc, &[nid], props);
     }
+    let props_place = get(p, "props").is_some_and(|o| o.get("x").is_some() || o.get("y").is_some());
+    if get(p, "x").is_some() || get(p, "y").is_some() || props_place {
+        warnings.extend(super::props::layout_position_warning(doc, &[nid]));
+    }
     if boolean(p, "select").unwrap_or(true) {
         ds.selection = vec![nid];
     }

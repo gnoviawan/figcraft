@@ -8,7 +8,7 @@ use common::{Client, approx, png_dims};
 use serde_json::{Value, json};
 
 fn ids(v: &Value) -> Vec<Value> {
-    v.as_array().cloned().unwrap_or_default()
+    v.as_array().or_else(|| v["results"].as_array()).cloned().unwrap_or_default()
 }
 
 /// Task 1: a profile card with vertical auto layout, padding, gap, hug height, fill-width children.
