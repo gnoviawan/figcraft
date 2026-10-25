@@ -128,10 +128,10 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "batch",
             "Run commands as one step",
-            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error names the failing step. Returns an array of the results in order. A later step can use a layer an earlier step created: anywhere in its params, {\"$step\": n} stands for the `id` in step n's result (zero-based; {\"$step\": n, \"field\": \"…\"} picks another field). Example: [{\"command\":\"node.create\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$step\":0}}}] builds a frame and a text inside it in one call.",
+            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error starts with the failing step: its index, its name and its command. Name a step with \"as\", and anywhere in a later step's params {\"$name\": \"…\"} stands for the `id` in that step's result ({\"$name\": \"…\", \"field\": \"…\"} picks another field). Each name may name one step, and a step can refer only to steps before it. Example: [{\"command\":\"node.create\",\"as\":\"card\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$name\":\"card\"}}}] builds a frame and a text inside it in one call. With named steps it returns {\"results\": [...], \"names\": {\"card\": <id>}}, the results in order plus each name's id; without, the array of results. {\"$step\": n} (zero-based step index) still works and mixes with names.",
             obj(
                 json!({
-                    "commands": {"type": "array", "minItems": 1, "description": "Steps to run", "items": obj(json!({"command": string("Command id"), "params": {"type": "object"}}), &["command"])},
+                    "commands": {"type": "array", "minItems": 1, "description": "Steps to run", "items": obj(json!({"command": string("Command id"), "params": {"type": "object"}, "as": string("A name for this step, unique in the batch: later steps refer to its result with {\"$name\": \"<name>\"}, and the result's `names` maps it to its id")}), &["command"])},
                     "label": string("Undo history label (default \"Batch\")"),
                 }),
                 &["commands"],
@@ -497,7 +497,11 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Stri
         };
         let mut params = params;
         friendly_params(&mut params);
-        steps.push(json!({"command": cmd, "params": params}));
+        let mut step = json!({"command": cmd, "params": params});
+        if let Some(name) = c.get("as") {
+            step["as"] = name.clone();
+        }
+        steps.push(step);
     }
     let label = s_arg(a, "label")?.unwrap_or("Batch");
     exec(b, "command.batch", json!({"label": label, "commands": steps})).map(|v| ToolResult::json(&v))
