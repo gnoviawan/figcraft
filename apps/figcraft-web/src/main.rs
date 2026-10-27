@@ -13,7 +13,8 @@
 //!   (browsers block `ws://` from secure pages); serve it over `http://` on a trusted network to
 //!   join from other machines.
 //!
-//! URL query flag: `?webgl` forces the WebGL2 backend instead of WebGPU.
+//! URL query flags: `?webgl` forces the WebGL2 backend instead of WebGPU; `?control` installs
+//! `window.figcraft`, the page's control channel (`api.rs`), which is off without it.
 //!
 //! URL query `?embed=kiosk`: for a page that owns the shell. The editor hides its tab bar, home
 //! screen and menus, answers `UNKNOWN_METHOD` to the host calls that would bring them back or quit,
@@ -28,6 +29,8 @@
 //! bar and the browser history keep it, so the URL is as private as the link itself.
 
 #[cfg(target_arch = "wasm32")]
+mod api;
+#[cfg(target_arch = "wasm32")]
 mod bridge;
 #[cfg(any(target_arch = "wasm32", test))]
 mod host;
@@ -37,6 +40,8 @@ mod host_tests;
 mod query;
 #[cfg(test)]
 mod query_tests;
+#[cfg(any(target_arch = "wasm32", test))]
+mod saved_files;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

@@ -130,9 +130,24 @@ fn path_d(p: &BezPath) -> String {
     s
 }
 
+/// A matrix scale/shear coefficient to 6 significant digits (unlike [`num`], small values survive).
+fn coeff(v: f64) -> String {
+    if !v.is_finite() || v == 0.0 {
+        return "0".into();
+    }
+    let digits = 5 - v.abs().log10().floor() as i32;
+    let p = 10f64.powi(digits);
+    let r = (v * p).round() / p;
+    format!("{r}")
+}
+
 fn matrix(a: Affine) -> String {
     let c = a.as_coeffs();
-    format!("matrix({} {} {} {} {} {})", num(c[0]), num(c[1]), num(c[2]), num(c[3]), num(c[4]), num(c[5]))
+    // Snap float noise (e.g. 6e-17 from a 90 degree rotation) to zero, relative to the largest term.
+    let eps = c[..4].iter().fold(0.0f64, |m, v| m.max(v.abs())) * 1e-12;
+    let eps = eps.max(1e-12);
+    let k = |v: f64| if v.abs() <= eps { "0".to_string() } else { coeff(v) };
+    format!("matrix({} {} {} {} {} {})", k(c[0]), k(c[1]), k(c[2]), k(c[3]), num(c[4]), num(c[5]))
 }
 
 /// A view of page area `b` at `k` device pixels per unit (fewer when that makes it larger than
@@ -710,7 +725,8 @@ impl W<'_> {
                         let end = glyphs.get(j).map_or(line.char_end, |g| g.char_start).max(start).min(chars.len());
                         let text: String = chars.get(start.min(end)..end).unwrap_or(&[]).iter().collect();
                         let prev = start.checked_sub(1).and_then(|k| chars.get(k)).copied();
-                        let text = st.case.apply_after(text.trim_end_matches(['\n', '\r']), prev);
+                        let before = start.checked_sub(2).and_then(|k| chars.get(k)).copied();
+                        let text = st.case.apply_between(text.trim_end_matches(['\n', '\r']), before, prev);
                         let own = match layout.styles.get(style).and_then(|s| s.fills.as_ref()) {
                             Some(fills) => {
                                 let a = fills.iter().find_map(|p| self.paint_attr(p, n, area, xf)).unwrap_or_else(|| "fill=\"none\"".into());
@@ -726,7 +742,8 @@ impl W<'_> {
                 }
                 let text: String = chars.get(line.char_start..line.char_end.min(chars.len())).unwrap_or(&[]).iter().collect();
                 let prev = line.char_start.checked_sub(1).and_then(|k| chars.get(k)).copied();
-                let text = st.case.apply_after(text.trim_end_matches(['\n', '\r']), prev);
+                let before = line.char_start.checked_sub(2).and_then(|k| chars.get(k)).copied();
+                let text = st.case.apply_between(text.trim_end_matches(['\n', '\r']), before, prev);
                 let (x, y) = layout.glyphs.get(line.glyph_start).map_or((0.0, line.baseline), |g| (g.x, g.y));
                 let _ = write!(spans, "<tspan x=\"{}\" y=\"{}\">{}</tspan>", num(x), num(y), esc(&text));
             }

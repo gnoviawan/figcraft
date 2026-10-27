@@ -1,6 +1,6 @@
-//! `#join=` in the page's URL.
+//! `#join=` and `?control` in the page's URL.
 
-use crate::query::{join_link, shell};
+use crate::query::{control, join_link, shell};
 
 #[test]
 fn join_takes_the_rest_of_the_fragment() {
@@ -37,4 +37,15 @@ fn the_kiosk_shell_needs_the_whole_embed_entry() {
     for other in ["", "?", "?webgl", "?embed=", "?embed=Kiosk", "?embed=kiosk2", "?xembed=kiosk", "?embed=full&x=kiosk", "?x=embed%3Dkiosk"] {
         assert_eq!(shell(other), Shell::Full, "{other:?}");
     }
+}
+
+#[test]
+fn control_is_opt_in() {
+    assert!(control("?control"));
+    assert!(control("?webgl&control=1"), "after other entries, with a value");
+    assert!(control("control"), "no leading ?");
+    assert!(!control(""));
+    assert!(!control("?"));
+    assert!(!control("?webgl"));
+    assert!(!control("?nocontrol&controls"), "only the whole entry name");
 }

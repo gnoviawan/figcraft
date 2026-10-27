@@ -1,4 +1,5 @@
-//! The page's URL: the shell its query asks for and the invite link its fragment names.
+//! The page's URL: the shell its query asks for, the invite link its fragment names, and the flags
+//! its query sets.
 
 /// The invite link in `#join=<link>` (`fragment` is `location.hash`, with or without its `#`), still
 /// escaped. The fragment, unlike the query, never leaves the browser, so the link's secret stays out
@@ -19,4 +20,11 @@ pub fn join_link(fragment: &str) -> Option<&str> {
 pub fn shell(search: &str) -> figcraft_ui_egui::Shell {
     let query = search.strip_prefix('?').unwrap_or(search);
     if query.split('&').any(|entry| entry == "embed=kiosk") { figcraft_ui_egui::Shell::Kiosk } else { figcraft_ui_egui::Shell::Full }
+}
+
+/// Whether `search` (`location.search`, with or without its `?`) has a `control` entry (`?control`,
+/// or `?control=…` with any value): the page's control channel, `window.figcraft`, is installed only
+/// when it is asked for.
+pub fn control(search: &str) -> bool {
+    search.strip_prefix('?').unwrap_or(search).split('&').any(|entry| entry.split('=').next() == Some("control"))
 }

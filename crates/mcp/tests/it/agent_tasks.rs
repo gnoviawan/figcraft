@@ -372,13 +372,14 @@ fn task_section_with_named_steps() {
             {"command": "node.create", "as": "primary-label", "params": {"type": "text", "parent": {"$name": "primary"}, "text": "Order now", "props": {"fill": "#FFFFFF"}}},
             frame("secondary", Some("actions"), json!({"layout": "horizontal", "padding": [14, 24, 14, 24], "sizingH": "hug", "sizingV": "hug"})),
             {"command": "node.create", "as": "secondary-label", "params": {"type": "text", "parent": {"$name": "secondary"}, "text": "See the menu"}},
-            {"command": "node.set", "params": {"ids": [{"$name": "secondary"}], "props": {"stroke": "#A8432A", "strokeWeight": 1}}},
+            {"command": "node.set", "as": "outline", "params": {"ids": [{"$ref": "secondary"}], "props": {"stroke": "#A8432A", "strokeWeight": 1}}},
         ]}),
     );
     let results = ids(&out["results"]);
     assert_eq!(results.len(), 10);
     let names = out["names"].as_object().unwrap();
-    assert_eq!(names.len(), 9, "{names:?}");
+    assert_eq!(names.len(), 10, "{names:?}");
+    assert_eq!(names["outline"], Value::Null, "node.set returns no id");
     assert_eq!(names["hero"], results[0]["id"]);
     assert_eq!(names["secondary-label"], results[8]["id"]);
     let hero = c.node(&names["hero"]);
@@ -399,6 +400,35 @@ fn task_section_with_named_steps() {
             {"command": "node.create", "as": "cta", "params": {"type": "frame", "parent": {"$name": "card"}}},
         ]}),
     );
-    assert!(e.starts_with("step 1 \"label\" (node.create)") && e.contains("\"cta\"") && e.contains("earlier step"), "{e}");
+    assert!(e.contains("step 1: `$name` \"cta\" is step 2, not an earlier step"), "{e}");
     assert!(c.page_children().is_empty(), "the failed batch rolled back");
+}
+
+/// Named steps and a path into a list result: duplicate a frame, then rename the copy through
+/// `{"$ref": "copy", "field": "ids/0"}` instead of counting steps.
+#[test]
+fn task_named_steps_and_a_duplicate_in_one_batch() {
+    let mut c = Client::new();
+    let out = c.ok(
+        "batch",
+        json!({"label": "Copy", "commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame", "name": "Card", "width": 100, "height": 50}},
+            {"command": "edit.duplicate", "as": "copy", "params": {"ids": [{"$ref": "card"}]}},
+            {"command": "node.set", "params": {"ids": [{"$ref": "copy", "field": "ids/0"}], "props": {"name": "Card copy"}}},
+        ]}),
+    );
+    let results = ids(&out);
+    let copy = results[1]["ids"][0].clone();
+    assert_eq!(c.node(&copy)["name"], "Card copy");
+    assert_eq!(c.node(&results[0]["id"])["name"], "Card", "the original keeps its name");
+    assert_eq!(c.doc()["history"]["undo"][0], "Copy", "one undo step");
+    // An unknown name fails the whole batch, names the step and lists the names there are.
+    let e = c.err(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame"}},
+            {"command": "node.set", "params": {"ids": [{"$ref": "crad"}], "props": {"name": "x"}}},
+        ]}),
+    );
+    assert!(e.contains("step 1") && e.contains("\"crad\" names no step") && e.contains("\"card\" is step 0"), "{e}");
 }
