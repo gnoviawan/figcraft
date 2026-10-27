@@ -4,8 +4,9 @@
 //! The player works on its own copy of the document (interactive components, variables and scroll
 //! offsets change it without touching the user's file) and copies the editor's document again
 //! whenever it changes, so the preview pane follows edits live. On a device, the presented frame
-//! is sized to the device's screen ([`fit_viewport`]): what doesn't fit is clipped, or scrolls when
-//! the frame's overflow allows it. A responsive prototype's frame is instead resized to the screen
+//! is sized to the device's screen ([`fit_viewport`]): a frame bigger than the screen scrolls
+//! through its whole size (as in Figma, with no overflow setting), while content past the frame's
+//! own edges scrolls only as its overflow allows and is otherwise clipped. A responsive prototype's frame is instead resized to the screen
 //! (the device's, else the player's whole area) and laid out again, its constraints and auto layout
 //! responding (`figcraft_engine::cmd::proto::respond`, on the player's copy, from the design each
 //! time). Device bodies are drawn in code in the device's colour. Every frame is rendered through
@@ -287,6 +288,9 @@ pub struct Presenter {
     /// The layer the Inspect panel shows (the last one under the pointer).
     inspected: Option<NodeId>,
     urls: Vec<String>,
+    /// A link to a website waiting for the viewer to open it ([`link_notice`]), and whether "Don't
+    /// show this again" is ticked.
+    link_notice: Option<(String, bool)>,
     /// The editor's document as last copied (the player copies it again when it changes).
     source: Option<Arc<Document>>,
     /// Scrolling by dragging: what it scrolls and its offset when the drag began.
@@ -330,6 +334,11 @@ impl Presenter {
         true
     }
 
+    /// The frame the presentation started from (Restart goes back there).
+    pub fn start(&self) -> NodeId {
+        self.start
+    }
+
     pub fn new(start: NodeId) -> Self {
         Self {
             current: start,
@@ -362,6 +371,7 @@ impl Presenter {
             clock: 0.0,
             inspected: None,
             urls: Vec::new(),
+            link_notice: None,
             source: None,
             drag_scroll: None,
             view: PresentView::default(),
@@ -511,6 +521,16 @@ impl Presenter {
         self.rev += 1;
     }
 
+    /// After an action changed layers of `design` (since `before`): text resizes to what it shows,
+    /// instances follow and auto layout reflows, as after an edit on the canvas; then
+    /// [`relayout`](Self::relayout).
+    fn settle(&mut self, before: &Document) {
+        if let Some(d) = self.design.as_mut() {
+            figcraft_engine::normalize(d, before);
+        }
+        self.relayout();
+    }
+
     /// Responsive prototypes: resize the presented frame to a screen of `size` (None: frames
     /// keep their size). Lays out again only when it changes.
     fn respond_to(&mut self, size: Option<(f64, f64)>) {
@@ -614,6 +634,7 @@ impl Presenter {
             "zoom": self.zoom,
             "flinging": self.fling.is_some(),
             "gamepad": self.uses_pads,
+            "linkNotice": self.link_notice.as_ref().map(|(url, _)| url),
         })
     }
 
@@ -865,7 +886,9 @@ impl Presenter {
             }
             Action::CloseOverlay => self.close_overlay(now),
             Action::OpenUrl { url } => {
-                if !url.trim().is_empty() {
+                // The URL comes from the document and this action fires from whatever trigger the
+                // prototype sets, including a delay, so no click is implied: only a web link opens.
+                if figcraft_engine::doc_urls::openable(url) {
                     self.urls.push(url.clone());
                 }
                 true
@@ -877,28 +900,31 @@ impl Presenter {
                 }
                 self.begin(tr, dur, easing, now);
                 let Some(d) = self.design.as_mut() else { return false };
+                let before = d.clone();
                 if let Some(n) = d.node_mut(inst)
                     && let NodeKind::Instance { component, .. } = &mut n.kind
                 {
                     *component = *dest;
                 }
                 figcraft_engine::components::sync_instance(d, inst);
-                self.relayout();
+                self.settle(&before);
                 true
             }
             Action::SetVariable { variable, value, expr } => {
                 let Some(d) = self.design.as_mut() else { return false };
+                let before = d.clone();
                 let set = figcraft_engine::proto_run::set_variable(d, node, variable, value, expr.as_ref());
                 if set {
-                    self.relayout();
+                    self.settle(&before);
                 }
                 set
             }
             Action::SetVariableMode { collection, mode } => {
                 let Some(d) = self.design.as_mut() else { return false };
+                let before = d.clone();
                 let set = figcraft_engine::proto_run::set_mode(d, self.current, collection, mode);
                 if set {
-                    self.relayout();
+                    self.settle(&before);
                 }
                 set
             }
@@ -1168,11 +1194,13 @@ pub fn scroll_range(doc: &Document, frame: NodeId) -> (f64, f64) {
 
 /// How far `frame`'s content can scroll when `viewport` (page units, from its top-left) of it
 /// shows, as a device's screen shows a top-level frame: the frame itself is content then, so a
-/// frame taller than the screen scrolls through its whole height. Without a viewport the frame
-/// shows at its own size and what overflows it scrolls. Only the axes its overflow allows scroll.
+/// frame bigger than the screen scrolls through its whole size whatever its overflow (as in
+/// Figma, a top-level frame needs no overflow setting for that). Without a viewport the frame
+/// shows at its own size and what overflows it scrolls. Content past the frame's own edges
+/// scrolls only on the axes its overflow allows.
 pub fn scroll_range_in(doc: &Document, frame: NodeId, viewport: Option<(f64, f64)>) -> (f64, f64) {
     let Some(n) = doc.node(frame) else { return (0.0, 0.0) };
-    if n.overflow == Overflow::None {
+    if n.overflow == Overflow::None && viewport.is_none() {
         return (0.0, 0.0);
     }
     let (mut x1, mut y1) = (0.0f64, 0.0f64);
@@ -1189,6 +1217,13 @@ pub fn scroll_range_in(doc: &Document, frame: NodeId, viewport: Option<(f64, f64
         x1 += l.padding[1];
         y1 += l.padding[2];
     }
+    // Axes the overflow doesn't scroll clip what lies past the frame's edges.
+    if !matches!(n.overflow, Overflow::Horizontal | Overflow::Both) {
+        x1 = 0.0;
+    }
+    if !matches!(n.overflow, Overflow::Vertical | Overflow::Both) {
+        y1 = 0.0;
+    }
     let (vw, vh) = match viewport {
         Some(v) => {
             x1 = x1.max(n.width);
@@ -1197,8 +1232,7 @@ pub fn scroll_range_in(doc: &Document, frame: NodeId, viewport: Option<(f64, f64
         }
         None => (n.width, n.height),
     };
-    let rx = if matches!(n.overflow, Overflow::Horizontal | Overflow::Both) { (x1 - vw).max(0.0) } else { 0.0 };
-    let ry = if matches!(n.overflow, Overflow::Vertical | Overflow::Both) { (y1 - vh).max(0.0) } else { 0.0 };
+    let (rx, ry) = ((x1 - vw).max(0.0), (y1 - vh).max(0.0));
     (if rx.is_finite() { rx } else { 0.0 }, if ry.is_finite() { ry } else { 0.0 })
 }
 
@@ -1640,18 +1674,33 @@ enum BarAction {
     Inspect,
 }
 
+pub struct PresentTab {
+    pub id: u64,
+    /// Empty while the tab is on screen: then the player is in `app.ui.present`.
+    pub pres: Option<Presenter>,
+    pub doc_uid: u64,
+    pub path: Option<String>,
+    pub page: NodeId,
+    pub file: String,
+    pub page_name: String,
+}
+
 /// The full-window presenter (while `app.ui.present` is set). Escape or Close ends it.
 pub fn show(app: &mut FigApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let now = ctx.input(|i| i.time);
     let Some(mut pres) = app.ui.present.take() else { return };
-    if let Ok(ds) = app.session.ds() {
+    // A tab can play a file that is closed or not in front. Then it must not read or change
+    // the file in front.
+    let live = crate::tabs::present_owner_active(app);
+    if live && let Ok(ds) = app.session.ds() {
         pres.sync(&ds.doc, now);
     }
     poll_pads(app, &mut pres, &ctx);
     let mut action = None;
-    // Typing a reply to a comment keeps the keys from the prototype; Shift+C shows the comments.
-    let typing = ctx.egui_wants_keyboard_input();
+    // Typing a reply to a comment keeps the keys from the prototype, and so does the link notice
+    // while it shows; Shift+C shows the comments.
+    let typing = ctx.egui_wants_keyboard_input() || pres.link_notice.is_some();
     if !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::C)) {
         action = Some(BarAction::Comments);
     }
@@ -1682,7 +1731,8 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
         Some(BarAction::Inspect) => pres.view.inspect = !pres.view.inspect,
         _ => {}
     }
-    if pres.view.comments
+    if live
+        && pres.view.comments
         && let Some((frame, place, clip)) = pres.shown
     {
         crate::comments::presenter(app, &ctx, frame, place, clip);
@@ -1690,19 +1740,23 @@ pub fn show(app: &mut FigApp, ui: &mut Ui) {
         app.ui.comments.close();
     }
     finish(app, &mut pres);
+    link_notice(app, &mut pres, &ctx, Id::new("present_link_notice"));
     // The options carry over to the next presentation.
     app.ui.present_view = pres.view;
-    if let Some(BarAction::Responsive(on)) = action {
+    if live && let Some(BarAction::Responsive(on)) = action {
         app.run("proto.settings", json!({"responsive": on}));
     }
-    if let Some(device) = picked_device {
+    if live && let Some(device) = picked_device {
         choose_device(app, &mut pres, &device);
     }
-    if action == Some(BarAction::Close) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-        app.ui.present_uid = None;
-        return;
-    }
     app.ui.present = Some(pres);
+    if action == Some(BarAction::Close) || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if let Some(id) = app.ui.present_active {
+            crate::tabs::close_present(app, id);
+        } else {
+            app.ui.present = None;
+        }
+    }
 }
 
 /// Device choices in the presenter use the screen's real dimensions and reflow a copy of the
@@ -1786,8 +1840,7 @@ fn navigation_bar(p: &mut Presenter, ctx: &egui::Context, now: f64) -> Option<St
                     let scale_menu = ui.menu_button(format!("{}    ", tr(p.view.scale.label(settings.device().is_some()))), |ui| {
                         navigation_menu(ui, |ui| {
                             for scale in PresentScale::options(settings.device().is_some()) {
-                                let label = egui::RichText::new(tr(scale.label(settings.device().is_some()))).color(t.menu_text);
-                                if ui.selectable_label(p.view.scale == *scale, label).clicked() {
+                                if ui.selectable_label(p.view.scale == *scale, tr(scale.label(settings.device().is_some()))).clicked() {
                                     p.set_scale(*scale);
                                     ui.close();
                                 }
@@ -1810,15 +1863,8 @@ fn paint_menu_chevron(painter: &egui::Painter, button: Rect, color: Color32) {
 }
 
 fn navigation_menu(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    let t = Tokens::get(ui.ctx());
-    ui.visuals_mut().override_text_color = Some(t.menu_text);
-    egui::Frame::NONE.fill(t.menu).stroke(Stroke::new(1.0, t.border)).corner_radius(CornerRadius::same(7)).inner_margin(egui::Margin::same(6)).show(
-        ui,
-        |ui| {
-            ui.set_min_width(212.0);
-            add(ui);
-        },
-    );
+    ui.set_min_width(212.0);
+    add(ui);
 }
 
 /// How often the player polls the controllers while its prototype has gamepad triggers (seconds).
@@ -1840,13 +1886,58 @@ fn poll_pads(app: &mut FigApp, p: &mut Presenter, ctx: &egui::Context) {
     crate::repaint_in(ctx, PAD_POLL_SECS);
 }
 
-/// After a player's frame: the links it opens and the widget clicks it took.
+/// After a player's frame: the links it opens and the widget clicks it took. A link to a website
+/// waits in [`link_notice`] unless the viewer chose to skip the notice; a second link to a website
+/// that fires while the notice shows is dropped.
 fn finish(app: &mut FigApp, p: &mut Presenter) {
     for u in p.urls.drain(..) {
-        app.services.open_url(&u);
+        if app.session.prefs.link_notice_skipped || !goes_to_a_website(&u) {
+            app.services.open_url(&u);
+        } else if p.link_notice.is_none() {
+            p.link_notice = Some((u, false));
+        }
     }
     if let Some(e) = p.click_widgets(&app.session) {
         app.toast(e);
+    }
+}
+
+/// Whether `url` is an `http` or `https` link (a `mailto:` link opens the mail app instead).
+fn goes_to_a_website(url: &str) -> bool {
+    url.trim().split_once(':').is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+}
+
+/// The notice before a link leaves the prototype for a website: the link, "Don't show this
+/// again" (saved with the preferences when Open link is pressed), Open link and Cancel. Escape or
+/// the close button cancels.
+fn link_notice(app: &mut FigApp, p: &mut Presenter, ctx: &egui::Context, id: Id) {
+    let Some((url, skip)) = p.link_notice.as_mut() else { return };
+    let t = Tokens::get(ctx);
+    let (mut open, mut go, mut cancel) = (true, false, false);
+    crate::dialogs::window(tr("Leaving the prototype"), ctx).id(id).open(&mut open).show(ctx, |ui| {
+        ui.set_width(340.0);
+        widgets::label(ui, tr("This link opens a website outside the prototype:"), t.text);
+        ui.add(egui::Label::new(egui::RichText::new(url.as_str()).font(regular(11.0)).color(t.text_secondary)).wrap());
+        ui.add_space(8.0);
+        if widgets::checkbox(ui, *skip, tr("Don't show this again")) {
+            *skip = !*skip;
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            go = widgets::button(ui, tr("Open link"), true, true).clicked();
+            cancel = widgets::button(ui, tr("Cancel"), false, true).clicked();
+        });
+    });
+    cancel |= !open || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if go {
+        let Some((url, skip)) = p.link_notice.take() else { return };
+        if skip {
+            app.run("proto.linkNotice", json!({"show": false}));
+            app.services.save_prefs(&app.session.prefs);
+        }
+        app.services.open_url(&url);
+    } else if cancel {
+        p.link_notice = None;
     }
 }
 
@@ -1954,6 +2045,7 @@ pub fn show_pane(app: &mut FigApp, ctx: &egui::Context) {
             action = player(&mut pane.player, ui, rect, now, chrome);
         });
     finish(app, &mut pane.player);
+    link_notice(app, &mut pane.player, ctx, pane_id().with("link_notice"));
     match action {
         Some(BarAction::Close) => {}
         Some(BarAction::Present) => {
@@ -2128,8 +2220,10 @@ fn player(p: &mut Presenter, ui: &mut Ui, rect: Rect, now: f64, chrome: Chrome) 
     let resp = ui.interact(area, ui.id().with("present_area"), Sense::click_and_drag());
     let over = resp.contains_pointer();
     if let Some(l) = layout(p, area, chrome) {
-        // The pane only takes the keyboard while the pointer is over it.
-        input(p, &ctx, &l, over, chrome.keys && (!chrome.pane || over), chrome.pane, now);
+        // The pane only takes the keyboard while the pointer is over it. While a link notice shows
+        // the prototype takes neither keys nor the pointer (Escape there cancels the notice).
+        let keys = chrome.keys && p.link_notice.is_none() && (!chrome.pane || over);
+        input(p, &ctx, &l, over && p.link_notice.is_none(), keys, chrome.pane, now);
     }
     let Some(l) = layout(p, area, chrome) else { return action };
     p.shown = Some((p.current, l.place, l.clip.intersect(area)));
@@ -2229,7 +2323,7 @@ fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) 
         }
         let on = (*act == BarAction::Comments && p.view.comments) || (*act == BarAction::Inspect && p.view.inspect);
         if on {
-            ui.painter().rect_filled(br, CornerRadius::same(5), ACCENT);
+            ui.painter().rect_filled(br, CornerRadius::same(5), t.accent);
         } else if resp.hovered() {
             ui.painter().rect_filled(br, CornerRadius::same(5), hover);
         }
@@ -2240,9 +2334,9 @@ fn top_bar(p: &mut Presenter, ui: &mut Ui, bar: Rect, now: f64, chrome: Chrome) 
             resp = resp.tip(tr("Inspect the layer under the pointer: size, colours, typography"));
         }
         if chrome.pane {
-            icons::paint(ui.painter(), br.shrink(5.0), *icon, t.icon);
+            icons::paint(ui.painter(), br.shrink(5.0), *icon, if on { t.accent_on } else { t.icon });
         } else {
-            ui.painter().text(br.center(), Align2::CENTER_CENTER, shown, regular(11.5), text);
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, shown, regular(11.5), if on { t.accent_on } else { text });
         }
         if *act == BarAction::Options {
             let menu = crate::right::menu_popup(&resp).width(220.0).show(|ui| options_menu(p, ui, device, settings.responsive, now));
@@ -2362,7 +2456,7 @@ fn scrollers_at(p: &Presenter, base: &Document, disp: &Document, root: NodeId, p
     let mut out: Vec<NodeId> = disp
         .subtree(root)
         .into_iter()
-        .filter(|f| disp.node(*f).is_some_and(|n| n.visible && n.overflow != Overflow::None))
+        .filter(|f| disp.node(*f).is_some_and(|n| n.visible && (n.overflow != Overflow::None || *f == root)))
         .filter(|f| disp.world_bounds(*f).is_some_and(|b| place.rect(b).contains(q)))
         .filter(|f| p.range(base, *f) != (0.0, 0.0))
         .collect();
@@ -3150,9 +3244,11 @@ mod tests {
         assert_eq!(disp.world_bounds(list).unwrap().y0, 800.0);
         p.scroll_to(0.0, 99_999.0);
         assert_eq!(p.scroll[&a], (0.0, 1148.0), "clamped to the range");
-        // Without scrolling the screen only clips; without a device the frame shows whole.
+        // A top-level frame taller than the screen scrolls without an overflow setting (its own
+        // range still clips nested content); without a device the frame shows whole.
         d.get_mut(a).unwrap().overflow = Overflow::None;
-        assert_eq!(scroll_range_in(&d, a, viewport(&d, a)), (0.0, 0.0));
+        assert_eq!(scroll_range_in(&d, a, viewport(&d, a)), (0.0, 1148.0));
+        assert_eq!(scroll_range(&d, a), (0.0, 0.0));
         if let Some(pg) = d.page_of(a)
             && let NodeKind::Page { prototype, .. } = &mut d.get_mut(pg).unwrap().kind
         {

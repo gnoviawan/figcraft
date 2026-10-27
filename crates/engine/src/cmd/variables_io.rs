@@ -18,14 +18,14 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "variable.export",
             "Export variables",
-            "{collections? [ids or names; default every collection of this file, not library copies], format? (json (default): the local variables JSON that variable.import reads | css: custom properties, the default mode on :root and each other mode on [data-<collection>=\"<mode>\"]), path? (write it there)}  → {text}, or {path} when written",
+            "{collections? [ids or names; default every collection of this file, not library copies], format? (json (default): the local variables JSON that variable.import reads | css: custom properties, the default mode on :root and each other mode on [data-<collection>=\"<mode>\"]; numbers in px unless layers or scopes use them as opacity or font weight), path? (write it there)}  → {text}, or {path} when written",
             false,
             export
         ),
         spec!(
             "variable.import",
             "Import variables",
-            "{variables (the local variables JSON, as variable.export writes it: an object, JSON text or a path)}  collections join this file's collection of the same name (values by mode name; new modes and variables are added, a variable of another type is skipped), others are added  → {collections (added), variables (added), updated, warnings}",
+            "{variables (the local variables JSON, as variable.export writes it: an object, JSON text or a path; `variableCollections` and `variables` under `meta` or at the top level)}  collections join this file's collection of the same name (values by mode name; new modes and variables are added, a variable of another type is skipped), others are added  → {collections (added), variables (added), updated, warnings (also when it holds no variables, or fewer than its collections list)}",
             true,
             import
         ),
@@ -46,7 +46,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     let text = match string(p, "format").as_deref().unwrap_or("json") {
         "json" => serde_json::to_string_pretty(&figcraft_format::rest::export_variables(&doc.variables, &colls))
             .map_err(|e| EngineError::Other(e.to_string()))?,
-        "css" => css(&doc.variables, &colls),
+        "css" => css(doc, &colls),
         _ => return Err(bad(cmd, "format: json|css")),
     };
     match string(p, "path") {
@@ -66,7 +66,11 @@ fn css_safe(text: &str) -> String {
 /// Each collection's variables as custom properties (named as generated code names them): the
 /// default mode's values on `:root`, every other mode's on `[data-<collection>="<mode>"]`;
 /// aliases are `var(--name)`.
-fn css(vars: &Variables, colls: &[&Collection]) -> String {
+fn css(doc: &Document, colls: &[&Collection]) -> String {
+    let vars = &doc.variables;
+    // Lengths need a unit where CSS reads them (`border-radius: var(--radius)`); opacity and
+    // font weight don't.
+    let roles = crate::token_roles::Roles::new(doc);
     let mut out = String::new();
     for c in colls {
         let attr = css_var_name(&c.name);
@@ -76,7 +80,8 @@ fn css(vars: &Variables, colls: &[&Collection]) -> String {
             for v in vars.variables.iter().filter(|v| v.collection == c.id) {
                 let value = match v.values.get(&m.id) {
                     Some(VariableValue::Color(col)) => col.to_css(),
-                    Some(VariableValue::Number(x)) => trim_num(*x),
+                    Some(VariableValue::Number(x)) if roles.role(v) == crate::token_roles::NumberRole::Unitless => trim_num(*x),
+                    Some(VariableValue::Number(x)) => format!("{}px", trim_num(*x)),
                     Some(VariableValue::String(t)) => format!("\"{}\"", css_safe(t)),
                     Some(VariableValue::Boolean(b)) => b.to_string(),
                     Some(VariableValue::Alias(a)) => match vars.get(a) {

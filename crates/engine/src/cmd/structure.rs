@@ -10,11 +10,13 @@ use super::{CommandSpec, ok};
 use crate::params::*;
 use crate::{EngineError, Result, Session, bad, spec};
 
+/// The layer structure commands: group, frame, mask, boolean operations, flatten, auto layout
+/// add/remove, move to page and vector path edits.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec!("object.group", "Group selection", "{ids?, name?}", true, |s, p| wrap(s, p, Wrap::Group)),
+        spec!("object.group", "Group selection", "{ids?, name?}", true, |s, p| wrap(s, p, "object.group", Wrap::Group)),
         spec!("object.ungroup", "Ungroup selection", "{ids?}", true, ungroup),
-        spec!("object.frameSelection", "Frame selection", "{ids?, name?}", true, |s, p| wrap(s, p, Wrap::Frame)),
+        spec!("object.frameSelection", "Frame selection", "{ids?, name?}", true, |s, p| wrap(s, p, "object.frameSelection", Wrap::Frame)),
         spec!("object.removeFrame", "Remove frame", "{ids?}", true, ungroup),
         spec!(
             "object.convertToGroup",
@@ -42,7 +44,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Wrap in new section",
             "{ids?, name?} (layers on the page or in a section; the section wraps them with some room)",
             true,
-            |s, p| wrap(s, p, Wrap::Section)
+            |s, p| wrap(s, p, "object.wrapInSection", Wrap::Section)
         ),
         spec!(
             "object.resizeToFit",
@@ -71,7 +73,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 // Hugging needs auto layout and the children that filled have nothing to fill: both
                 // become fixed (the frame keeps filling its own auto layout parent).
                 let doc = s.doc_mut()?;
-                doc.get_mut(i)?.layout = None;
+                let n = doc.get_mut(i)?;
+                n.layout = None;
+                super::props::drop_layout_bindings(n);
                 figcraft_layout::coherent_sizing(doc, i);
             }
             ok()
@@ -103,6 +107,20 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             ok()
         }),
+        spec!(
+            "vector.fillRule",
+            "Set fill rule",
+            "{ids? | id?, region? (a filled area of a vector; every area when left out), rule: nonZero|evenOdd}",
+            true,
+            fill_rule
+        ),
+        spec!(
+            "vector.reverseLoop",
+            "Reverse loop",
+            "{ids? | id?, region, loop} (a loop of a filled area; its direction flips, which changes how the area fills)",
+            true,
+            reverse_loop
+        ),
         spec!("vector.simplify", "Simplify vector", "{ids?, tolerance?}", true, simplify),
         spec!("vector.offset", "Offset path", "{ids?, offset}", true, offset_path),
         spec!("vector.join", "Join selection", "{ids?} (in vector edit mode: joins the selected points)", true, |s, p| {
@@ -128,26 +146,27 @@ const SECTION_PAD: f64 = 40.0;
 const BOOL_PARAMS: &str = "{ids?} — layers inside boolean groups: sets their own operation (how each combines with the operands below it); one boolean group: sets its operation (every operand follows it); otherwise wraps the layers in a new boolean group";
 
 /// Wrap the selection in a new boolean group doing `op`.
-pub(crate) fn wrap_boolean(s: &mut Session, p: &Value, op: BoolOp) -> Result<Value> {
-    wrap(s, p, Wrap::Bool(op))
+pub(crate) fn wrap_boolean(s: &mut Session, p: &Value, cmd: &str, op: BoolOp) -> Result<Value> {
+    wrap(s, p, cmd, Wrap::Bool(op))
 }
 
-/// Wrap the selection in a new container at the topmost selected layer's place.
-fn wrap(s: &mut Session, p: &Value, w: Wrap) -> Result<Value> {
-    let ids = req_targets("object.group", s, p)?;
+/// Wrap the selection in a new container at the topmost selected layer's place. Errors name `cmd`,
+/// the command that asked.
+fn wrap(s: &mut Session, p: &Value, cmd: &str, w: Wrap) -> Result<Value> {
+    let ids = req_targets(cmd, s, p)?;
     let doc = s.doc_mut()?;
     let ids = z_sorted(doc, &roots(doc, &ids));
-    let top = *ids.last().ok_or_else(|| bad("object.group", "nothing selected"))?;
-    let parent = doc.get(top)?.parent.ok_or_else(|| bad("object.group", "can't group a page"))?;
+    let top = *ids.last().ok_or_else(|| bad(cmd, "nothing selected"))?;
+    let parent = doc.get(top)?.parent.ok_or_else(|| bad(cmd, "can't group a page"))?;
     // Sections sit on the page or in sections, never in frames or groups.
     let board = |doc: &Document, i: NodeId| {
         doc.node(i).and_then(|n| n.parent).and_then(|p| doc.node(p)).is_some_and(|p| p.is_page() || matches!(p.kind, NodeKind::Section { .. }))
     };
     if matches!(w, Wrap::Section) && !ids.iter().all(|i| board(doc, *i)) {
-        return Err(bad("object.wrapInSection", "only layers on the page or in a section can be wrapped in a section"));
+        return Err(bad(cmd, "only layers on the page or in a section can be wrapped in a section"));
     }
     if !matches!(w, Wrap::Section) && ids.iter().any(|i| doc.node(*i).is_some_and(|n| matches!(n.kind, NodeKind::Section { .. }))) {
-        return Err(bad("object.group", "sections can't go in groups or frames"));
+        return Err(bad(cmd, "sections can't go in groups or frames"));
     }
     let index = doc.index_in_parent(top).map(|i| i + 1);
     let mut bounds = doc.bounds_of(&ids).unwrap_or_default();
@@ -285,7 +304,7 @@ fn convert_to_section(s: &mut Session, p: &Value) -> Result<Value> {
         n.grids.clear();
         n.guides.clear();
         n.styles.grid = None;
-        n.bound.retain(|k, _| !k.starts_with("padding") && !matches!(k.as_str(), "gap" | "counterAxisSpacing"));
+        super::props::drop_layout_bindings(n);
         let kids = n.children.clone();
         for k in kids {
             // Out of the flow there is nothing to fill or to be absolute against.
@@ -338,7 +357,7 @@ fn mask(s: &mut Session, p: &Value) -> Result<Value> {
         return ok();
     }
     // Group, then the bottom-most child is the mask.
-    let r = wrap(s, &json!({"ids": ids, "name": "Mask group"}), Wrap::Group)?;
+    let r = wrap(s, &json!({"ids": ids, "name": "Mask group"}), "object.mask", Wrap::Group)?;
     let gid = id_of(&r["id"]).ok_or_else(|| EngineError::Other("group failed".into()))?;
     let doc = s.doc_mut()?;
     if let Some(first) = doc.get(gid)?.children.first().copied() {
@@ -472,7 +491,7 @@ fn outline_stroke(s: &mut Session, p: &Value) -> Result<Value> {
                 let f = doc.get_mut(fill_id)?;
                 f.strokes.clear();
             }
-            let r = wrap(s, &json!({"ids": [fill_id, vid], "name": n.name}), Wrap::Group)?;
+            let r = wrap(s, &json!({"ids": [fill_id, vid], "name": n.name}), "vector.outlineStroke", Wrap::Group)?;
             if let Some(g) = id_of(&r["id"]) {
                 out.push(g);
             }
@@ -519,7 +538,7 @@ fn layout_add(s: &mut Session, p: &Value) -> Result<Value> {
         ids
     } else {
         // Wrap non-frames in a new frame without a fill, then add auto layout to it.
-        let r = wrap(s, &json!({"ids": ids}), Wrap::Frame)?;
+        let r = wrap(s, &json!({"ids": ids}), "layout.add", Wrap::Frame)?;
         let fid = id_of(&r["id"]).ok_or_else(|| EngineError::Other("wrap failed".into()))?;
         let f = s.doc_mut()?.get_mut(fid)?;
         f.fills.clear();
@@ -723,4 +742,147 @@ fn resize_to_fit(s: &mut Session, p: &Value) -> Result<Value> {
         fitted.push(id);
     }
     Ok(json!({"ids": fitted}))
+}
+
+/// The vector network of `id`, when it is a vector layer.
+fn network_mut(doc: &mut Document, id: NodeId) -> Option<&mut VectorNetwork> {
+    match &mut doc.get_mut(id).ok()?.kind {
+        NodeKind::Vector { network } => Some(network),
+        _ => None,
+    }
+}
+
+/// The id a fill rule is written as.
+fn rule_id(rule: WindingRule) -> &'static str {
+    match rule {
+        WindingRule::NonZero => "nonZero",
+        WindingRule::EvenOdd => "evenOdd",
+    }
+}
+
+/// `region` as an index: absent (or null) means every area.
+fn area_index(cmd: &str, p: &Value) -> Result<Option<usize>> {
+    match get(p, "region") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let k = f64_of(v).ok_or_else(|| bad(cmd, "`region` must be a number"))?;
+            if !(0.0..1e9).contains(&k) || k.fract() != 0.0 {
+                return Err(bad(cmd, "`region` out of range"));
+            }
+            Ok(Some(k as usize))
+        }
+    }
+}
+
+/// Segments another one- or two-segment loop lists: a short loop takes its direction from the ends
+/// its segments are stored with, so re-storing one of those would turn that loop round too. A loop
+/// of three or more segments is left out: its ring is walked in list order, which the stored ends
+/// don't decide.
+fn short_loop_segments(net: &VectorNetwork, skip: (usize, usize)) -> std::collections::HashSet<usize> {
+    let mut out = std::collections::HashSet::new();
+    for (r, region) in net.regions.iter().enumerate() {
+        for (l, lp) in region.loops.iter().enumerate() {
+            if (r, l) != skip && lp.len() <= 2 {
+                out.extend(lp.iter().copied());
+            }
+        }
+    }
+    out
+}
+
+fn fill_rule(s: &mut Session, p: &Value) -> Result<Value> {
+    let ids = req_targets("vector.fillRule", s, p)?;
+    let rule = match string(p, "rule").as_deref().map(str::trim) {
+        Some("evenOdd" | "evenodd" | "EVENODD") => WindingRule::EvenOdd,
+        Some("nonZero" | "nonzero" | "NONZERO") => WindingRule::NonZero,
+        _ => return Err(bad("vector.fillRule", "`rule` is nonZero or evenOdd")),
+    };
+    let only = area_index("vector.fillRule", p)?;
+    let doc = s.doc_mut()?;
+    let mut count = 0usize;
+    for id in ids {
+        let Some(net) = network_mut(doc, id) else { continue };
+        match only {
+            Some(r) => {
+                if let Some(region) = net.regions.get_mut(r) {
+                    region.winding = rule;
+                    count += 1;
+                }
+            }
+            None => {
+                for region in &mut net.regions {
+                    region.winding = rule;
+                    count += 1;
+                }
+            }
+        }
+    }
+    if count == 0 {
+        return Err(EngineError::Disabled("vector.fillRule".into(), "no filled area to set (select a vector)".into()));
+    }
+    Ok(json!({"regions": count, "rule": rule_id(rule)}))
+}
+
+/// One loop of a vector, worked out but not yet written back: its segments in the new order and,
+/// for a loop of one or two segments, the one to store the other way.
+struct LoopFlip {
+    id: NodeId,
+    turned: Vec<usize>,
+    store: Option<usize>,
+}
+
+/// Turn one loop of a filled area round: its segments are walked the other way, so the area it
+/// bounds counts the other way in the winding (which turns a hole into a filled part and back).
+///
+/// How a loop is walked depends on how many segments it has:
+/// - three or more: the order they are listed in, each segment turned to continue from the point
+///   reached. Reversing the list is therefore enough, and the stored ends are left alone (a shared
+///   segment's ends belong to its neighbour too);
+/// - two: the same ring either way round, so one of the two has to be stored the other way instead;
+/// - one: only its stored ends say which way it runs, so they are swapped.
+///
+/// A short loop can only turn round by re-storing a segment, which is refused when another short
+/// loop lists that segment too: it would turn that area round as well.
+fn reverse_loop(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "vector.reverseLoop";
+    let ids = req_targets(cmd, s, p)?;
+    let region = req_index(cmd, p, "region")?;
+    let index = req_index(cmd, p, "loop")?;
+    let doc = s.doc_mut()?;
+    // Work every loop out before touching the document: one that can't turn round refuses the call
+    // and the others stay as they were.
+    let mut flips: Vec<LoopFlip> = Vec::new();
+    for id in ids {
+        let Some(NodeKind::Vector { network }) = doc.node(id).map(|n| &n.kind) else { continue };
+        let Some(loop_) = network.regions.get(region).and_then(|r| r.loops.get(index)) else { continue };
+        if loop_.is_empty() {
+            continue;
+        }
+        let mut store = None;
+        if loop_.len() <= 2 {
+            let busy = short_loop_segments(network, (region, index));
+            let Some(pick) = loop_.iter().copied().filter(|s| !busy.contains(s)).min() else {
+                return Err(EngineError::Disabled(
+                    cmd.into(),
+                    "the loop shares its segments with another one- or two-segment loop, so turning it round would turn that one round too".into(),
+                ));
+            };
+            store = Some(pick);
+        }
+        flips.push(LoopFlip { id, turned: loop_.iter().rev().copied().collect(), store });
+    }
+    if flips.is_empty() {
+        return Err(EngineError::Disabled(cmd.into(), "no such loop (select a vector with filled areas)".into()));
+    }
+    for LoopFlip { id, turned, store } in flips {
+        let Some(net) = network_mut(doc, id) else { continue };
+        if let Some(seg) = store.and_then(|i| net.segments.get_mut(i)) {
+            std::mem::swap(&mut seg.a, &mut seg.b);
+            std::mem::swap(&mut seg.ta, &mut seg.tb);
+        }
+        if let Some(l) = net.regions.get_mut(region).and_then(|r| r.loops.get_mut(index)) {
+            *l = turned;
+        }
+    }
+    Ok(json!({"reversed": true}))
 }

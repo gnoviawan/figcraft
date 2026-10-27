@@ -11,22 +11,34 @@ use super::{CommandSpec, ok};
 use crate::params::*;
 use crate::{DocState, EngineError, Result, Session, bad, spec};
 
+/// A new file of `kind` in a tab of its own.
+fn new_file(s: &mut Session, p: &Value, kind: FileKind) -> Result<Value> {
+    let name = string(p, "name").unwrap_or_else(|| if kind == FileKind::Board { "Untitled board" } else { "Untitled" }.into());
+    let mut doc = Document::new(name);
+    doc.kind = kind;
+    // A property of the page from here on: a later change of theme leaves it alone. Boards are
+    // light whatever the theme.
+    let background = if kind == FileKind::Board { BOARD_PAGE } else { s.new_page_background() };
+    for page in doc.pages.clone() {
+        if let Some(NodeKind::Page { background: b, .. }) = doc.node_mut(page).map(|n| &mut n.kind) {
+            *b = background;
+        }
+    }
+    s.docs.push(DocState::new(doc, None));
+    s.active = s.docs.len() - 1;
+    Ok(json!({"index": s.active, "kind": kind.id()}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec!("file.new", "New design file", "{name?}", false, |s, p| {
-            let name = string(p, "name").unwrap_or_else(|| "Untitled".into());
-            let mut doc = Document::new(name);
-            // A property of the page from here on: a later change of theme leaves it alone.
-            let background = s.new_page_background();
-            for page in doc.pages.clone() {
-                if let Some(NodeKind::Page { background: b, .. }) = doc.node_mut(page).map(|n| &mut n.kind) {
-                    *b = background;
-                }
-            }
-            s.docs.push(DocState::new(doc, None));
-            s.active = s.docs.len() - 1;
-            Ok(json!({"index": s.active}))
-        }),
+        spec!("file.new", "New design file", "{name?}", false, |s, p| new_file(s, p, FileKind::Design)),
+        spec!(
+            "file.newBoard",
+            "New board",
+            "{name?}  a board: sticky notes, shapes with text, connectors, marker and stamps on a light page",
+            false,
+            |s, p| new_file(s, p, FileKind::Board)
+        ),
         spec!(
             "file.open",
             "Open",
@@ -92,6 +104,20 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec!("file.placeImage", "Place image", "{path | data, x?, y?}", true, super::create::place_image),
         spec!("file.close", "Close tab", "{index?, force? (discard unsaved changes)}", false, close),
+        spec!("file.moveTab", "Move tab", "{from, to} (indices among open documents)", false, |s, p| {
+            let from = req_index("file.moveTab", p, "from")?;
+            let to = req_index("file.moveTab", p, "to")?;
+            if from >= s.docs.len() || to >= s.docs.len() {
+                return Err(bad("file.moveTab", "no such document"));
+            }
+            if from != to {
+                let active_uid = s.docs.get(s.active).map(|d| d.uid);
+                let doc = s.docs.remove(from);
+                s.docs.insert(to, doc);
+                s.active = active_uid.and_then(|uid| s.docs.iter().position(|d| d.uid == uid)).unwrap_or(0);
+            }
+            Ok(json!({"index": to}))
+        }),
         spec!(
             "file.recover",
             "Recover file",
@@ -352,7 +378,7 @@ fn version_index(cmd: &str, ds: &DocState, p: &Value) -> Result<usize> {
     if i < ds.versions.len() { Ok(i) } else { Err(bad(cmd, format!("no version at index {i}"))) }
 }
 
-fn read_version(v: &Version) -> Result<Arc<Document>> {
+pub(crate) fn read_version(v: &Version) -> Result<Arc<Document>> {
     v.document().map_err(|e| EngineError::Other(format!("version “{}” can't be read: {e}", v.name)))
 }
 
@@ -462,11 +488,11 @@ pub(crate) fn write(path: &str, _bytes: &[u8]) -> Result<()> {
 }
 
 fn ext(path: &str) -> String {
-    std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase()
+    std::path::Path::new(path).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("").to_ascii_lowercase()
 }
 
 fn file_stem(path: &str) -> String {
-    std::path::Path::new(path).file_stem().and_then(|e| e.to_str()).unwrap_or("Untitled").to_string()
+    std::path::Path::new(path).file_stem().and_then(std::ffi::OsStr::to_str).unwrap_or("Untitled").to_string()
 }
 
 /// The counts the import report shows for a freshly loaded document.
@@ -528,7 +554,8 @@ fn load_with(
                 return Ok((figcraft_format::Loaded { issues: warnings, ..doc.into() }, true));
             }
             let mut loaded = figcraft_format::load_bytes_with_versions(bytes).map_err(|e| EngineError::Other(e.to_string()))?;
-            if loaded.doc.name.is_empty() {
+            // Older files saved an untouched default title even after the user chose a filename.
+            if loaded.doc.name.is_empty() || loaded.doc.name == "Untitled" {
                 loaded.doc.name = file_stem(name_hint);
             }
             Ok((loaded, false))
@@ -548,6 +575,7 @@ pub(crate) fn load_fig(bytes: &[u8], name: &str) -> Option<Result<figcraft_forma
 /// Link imported instances to their mains (layer sources, overrides found by comparing values),
 /// innermost first so outer instances settle last.
 fn link_instances(doc: &mut Document) {
+    super::styles::unfold_imported_bound_alpha(doc);
     crate::style_vars::after_load(doc);
     super::styles::apply_paint_bindings_on_load(doc);
     let mut insts: Vec<(usize, NodeId)> =
@@ -838,8 +866,14 @@ fn save_to(s: &mut Session, path: String) -> Result<Value> {
     }
     let i = crate::branches::file_tab(s);
     let ds = s.docs.get_mut(i).ok_or(EngineError::NoDocument)?;
-    let bytes = file_bytes(ds)?;
+    let mut snapshot = FileSnapshot::of(ds);
+    let follows_path = ds.path.as_deref().map_or(ds.doc.name == "Untitled", |old| ds.doc.name == file_stem(old));
+    if follows_path && ds.path.as_deref() != Some(path.as_str()) {
+        Arc::make_mut(&mut snapshot.doc).name = file_stem(&path);
+    }
+    let bytes = snapshot.encode()?;
     write(&path, &bytes)?;
+    ds.doc = snapshot.doc;
     ds.path = Some(path.clone());
     ds.mark_saved();
     ds.revision += 1;
@@ -907,14 +941,37 @@ pub fn export_area(doc: &Document, ids: &[NodeId], setting: &ExportSetting) -> O
         .reduce(|a, b| a.union(b))
 }
 
-/// What an export of `ids` draws, bottom to top: the layers themselves, or (contents only off,
-/// and always for slices) every top-level layer of their page, so whatever shows in the area is in.
-fn drawn_layers(doc: &Document, ids: &[NodeId], setting: &ExportSetting) -> Vec<NodeId> {
-    let slice = ids.iter().any(|i| doc.node(*i).is_some_and(|n| matches!(n.kind, NodeKind::Slice)));
-    match ids.first().and_then(|i| doc.page_of(*i)).and_then(|p| doc.node(p)) {
-        Some(page) if slice || !setting.contents_only => page.children.clone(),
-        _ => super::edit::z_sorted(doc, ids),
+/// What an export of `ids` draws, bottom to top: the layers themselves, or (contents only off)
+/// every top-level layer of their page, so whatever shows in the area is in. A slice paints nothing
+/// itself: with contents only on, a slice inside a frame or group draws that frame or group, and a
+/// slice anywhere else draws every top-level layer of its page.
+pub fn drawn_layers(doc: &Document, ids: &[NodeId], setting: &ExportSetting) -> Vec<NodeId> {
+    let Some(page) = ids.first().and_then(|i| doc.page_of(*i)).and_then(|p| doc.node(p)) else {
+        return super::edit::z_sorted(doc, ids);
+    };
+    if !setting.contents_only {
+        return page.children.clone();
     }
+    let mut own = Vec::with_capacity(ids.len());
+    for &i in ids {
+        if !doc.node(i).is_some_and(|n| matches!(n.kind, NodeKind::Slice)) {
+            own.push(i);
+            continue;
+        }
+        match slice_container(doc, i) {
+            Some(c) => own.push(c),
+            None => return page.children.clone(),
+        }
+    }
+    own.sort_unstable();
+    own.dedup();
+    super::edit::z_sorted(doc, &super::edit::roots(doc, &own))
+}
+
+/// The frame or group a slice sits in: None on the page or in a section.
+fn slice_container(doc: &Document, slice: NodeId) -> Option<NodeId> {
+    let parent = doc.node(slice)?.parent?;
+    doc.node(parent).is_some_and(|p| p.kind.is_frame_like() || matches!(p.kind, NodeKind::Group)).then_some(parent)
 }
 
 /// [`export_bytes`] with an export setting's format and options (its size is `scale`: see
@@ -1157,8 +1214,11 @@ fn export_path(name: &str) -> String {
     if parts.is_empty() { "Untitled".into() } else { parts.join("/") }
 }
 
-/// `name` without path separators and characters file systems reject.
-fn safe_file_name(name: &str) -> String {
+/// `name` without path separators and characters file systems reject (`/ \ : * ? " < > |` and
+/// control characters become `_`); everything else is kept, up to the first 200 characters.
+/// `figcraft-cli export` names its files by this rule too (and keeps at most 100 characters before
+/// the number and extension it adds).
+pub fn safe_file_name(name: &str) -> String {
     name.chars().take(200).map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c }).collect()
 }
 
@@ -1386,12 +1446,34 @@ fn close(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::Disabled("file.close".into(), "the document has unsaved changes (pass force: true to discard)".into()));
     }
     let uid = ds.uid;
+    let active_uid = s.docs.get(s.active).map(|d| d.uid);
     s.docs.remove(i);
-    if s.active >= s.docs.len() {
-        s.active = s.docs.len().saturating_sub(1);
-    }
+    // Removing a tab before the active one shifts its index; keep the same document selected.
+    s.active = active_uid.and_then(|a| s.docs.iter().position(|d| d.uid == a)).unwrap_or(i.min(s.docs.len().saturating_sub(1)));
     crate::branches::close_tabs(s, uid, None);
     ok()
+}
+
+#[cfg(test)]
+mod tab_order_tests {
+    use super::*;
+
+    #[test]
+    fn moving_and_closing_inactive_tabs_preserves_the_active_document() {
+        let mut session = Session::new();
+        for name in ["Two", "Three", "Four"] {
+            session.execute("file.new", &json!({"name": name})).unwrap();
+        }
+        session.execute("doc.switch", &json!({"index": 2})).unwrap();
+        let active_uid = session.docs[session.active].uid;
+        let moved_uid = session.docs[0].uid;
+        session.execute("file.moveTab", &json!({"from": 0, "to": 2})).unwrap();
+        assert_eq!(session.docs[2].uid, moved_uid);
+        assert_eq!(session.docs[session.active].uid, active_uid);
+        session.execute("file.close", &json!({"index": 0})).unwrap();
+        assert_eq!(session.docs[session.active].uid, active_uid);
+        assert!(session.execute("file.moveTab", &json!({"from": 0, "to": 99})).is_err());
+    }
 }
 
 /// Ctrl+Tab / Ctrl+Shift+Tab: the next or previous open document, wrapping around.

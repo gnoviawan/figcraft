@@ -524,10 +524,18 @@ fn read_images<R: Read + Seek>(
     own: Option<&BTreeSet<String>>,
     budget: ImageBudget,
 ) -> (BTreeMap<String, ImageData>, Vec<(String, FormatError)>) {
-    let mut hashes: Vec<String> = z.file_names().filter_map(|n| n.strip_prefix("images/")).map(str::to_string).collect();
+    let mut hashes: Vec<String> = z.file_names().filter_map(|n| n.strip_prefix("images/")).filter(|h| !h.is_empty()).map(str::to_string).collect();
     hashes.sort_by_key(|h| !own.is_some_and(|o| o.contains(h)));
     let mut images = BTreeMap::new();
     let mut unread = Vec::new();
+    // Member names that aren't plain hashes (`../x`, `a/b`) are never read, so never written back.
+    hashes.retain(|h| {
+        let ok = library::is_valid_hash(h);
+        if !ok {
+            unread.push((h.clone(), FormatError::Corrupt("its name isn't a valid image hash".to_string())));
+        }
+        ok
+    });
     let mut left = budget.bytes;
     for (i, hash) in hashes.into_iter().enumerate() {
         let name = format!("images/{hash}");

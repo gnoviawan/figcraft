@@ -78,7 +78,7 @@ pub(crate) fn clamp_to_range(k: &str, x: f64) -> f64 {
 
 /// Keys `node.set` understands (documented for agents).
 pub const KEYS: &str = "name, visible, locked, opacity (0-1, or a percentage such as \"80%\"), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), \
-fills (paints or colours; gradients as {type: linearGradient|radialGradient|angularGradient|diamondGradient, stops: [\"#hex\", ...], from?, to?} too), fill (colour), strokes, stroke (colour), strokeWeight, strokeAlign (inside|center|outside), strokeSides [t,r,b,l], strokeTopWeight / strokeRightWeight / strokeBottomWeight / strokeLeftWeight (one side; turns on individual strokes), \
+fills (paints or colours; gradients as {type: linearGradient|radialGradient|angularGradient|diamondGradient, stops: [\"#hex\", ...], from?, to?} too), fill (colour, or \"none\"/null: no fill), strokes, stroke (colour, or \"none\"/null: no stroke), strokeWeight, strokeAlign (inside|center|outside), strokeSides [t,r,b,l], strokeTopWeight / strokeRightWeight / strokeBottomWeight / strokeLeftWeight (one side; turns on individual strokes), \
 strokeCap / startCap / endCap, strokeJoin, miterAngle (degrees: sharper joins bevel; or miterLimit as a ratio), dashes [..], widthProfile (preset uniform|wedge|taper|eye|rounded|pinch, [[t, scale], ...] or null), brush (preset id, {preset, spacing, sizeJitter, rotationJitter, scatter, seed} or null), cornerRadius (n or [tl,tr,br,bl]), cornerSmoothing (0-1, or a percentage), effects, \
 clip, isMask, layout (null|horizontal|vertical|grid|{...}), gap, crossGap, padding (n or [t,r,b,l]), paddingTop/Right/Bottom/Left, \
 mainAlign (min|center|max, or the auto gaps spaceBetween|spaceAround|spaceEvenly), crossAlign (min|center|max|baseline: first text baselines, horizontal layouts), contentAlign (wrapped lines: auto = packed where crossAlign says | spaceBetween), wrap (rows of a horizontal layout, columns of a vertical one), strokesIncluded (the frame's inside stroke takes up space), reverseZ (canvas stacking: true = first on top), \
@@ -91,7 +91,9 @@ fontSize, lineHeight (auto|px|\"150%\"), letterSpacing (px|\"2%\"), textAlign (l
 textDecorationColor (colour, or auto/null: the text's), textCase (original|upper|lower|title|smallCaps), paragraphSpacing, paragraphIndent, \
 listStyle (none|bulleted|numbered; with start/end: the paragraphs those chars touch), indentation (list nesting level 0-8, same range rule), \
 listSpacing (px between list items, in place of paragraphSpacing), hangingPunctuation, hangingList (markers outside the box), leadingTrim (vertical trim: none|capHeight), maxLines, features ({tag: bool}, e.g. {\"liga\": false, \"tnum\": true}), \
-fontVariations / variationSettings ({axis: number}, e.g. {\"wght\": 550, \"wdth\": 85}; null = none), pointCount, innerRadius, arcStart, arcSweep, \
+fontVariations / variationSettings ({axis: number}, e.g. {\"wght\": 550, \"wdth\": 85}; null = none), \
+path (a vector's SVG path data: replaces its geometry, keeping the layer, its paints, styles and bindings; width/height in the same call scale it as \
+node.create does; its own box goes at the layer's x/y, or with x/y given, at x + its left edge and y + its top as node.create places it), pointCount, innerRadius, arcStart, arcSweep, \
 arcInner, booleanOperation (a boolean group's operation, or an operand's own; null: the group's), operandOperation (a layer in a boolean \
 group: how it combines with the operands below it; null: the group's), constrainProportions, description, interactions, overflow, pluginData {k: v}";
 
@@ -124,6 +126,53 @@ pub fn snake(v: &Value) -> Value {
         Value::Array(a) => Value::Array(a.iter().map(snake).collect()),
         other => other.clone(),
     }
+}
+
+/// `v` as an effect list, refusing keys an effect doesn't read (serde dropped them without a word,
+/// so a shadow given `offsetY` kept the default offset) and values out of range (`check_effect`).
+pub fn effects_from(cmd: &str, v: &Value) -> Result<Vec<Effect>> {
+    let effects: Vec<Effect> = serde_json::from_value(snake(v)).map_err(|e| bad(cmd, format!("effects: {e}")))?;
+    for (i, given) in v.as_array().into_iter().flatten().enumerate() {
+        refuse_ignored_effect_keys(cmd, &format!("effects[{i}]"), given, |v| serde_json::from_value(snake(v)).ok())?;
+    }
+    for (i, e) in effects.iter().enumerate() {
+        crate::params::check_effect(e).map_err(|why| bad(cmd, format!("`effects`[{i}]: {why}")))?;
+    }
+    Ok(effects)
+}
+
+/// `p[key]` as one effect, read as serde reads it (its aliases too), refusing keys it doesn't read
+/// and values out of range.
+pub fn effect_from(cmd: &str, p: &Value, key: &str) -> Result<Option<Effect>> {
+    let Some(v) = get(p, key) else { return Ok(None) };
+    let effect: Effect = serde_json::from_value(v.clone()).map_err(|e| bad(cmd, format!("`{key}`: {e}")))?;
+    refuse_ignored_effect_keys(cmd, &format!("`{key}`"), v, |v| serde_json::from_value(v.clone()).ok())?;
+    crate::params::check_effect(&effect).map_err(|why| bad(cmd, format!("`{key}`: {why}")))?;
+    Ok(Some(effect))
+}
+
+/// Refuse the keys of effect `given` that `parse` ignores, naming the keys the effect takes. Set to
+/// null, a key it reads fails to parse or changes the effect; a key it ignores changes nothing.
+fn refuse_ignored_effect_keys(cmd: &str, at: &str, given: &Value, parse: impl Fn(&Value) -> Option<Effect>) -> Result<()> {
+    let Some(fields) = given.as_object() else { return Ok(()) };
+    let parsed = parse(given);
+    let ignored: Vec<&str> = fields
+        .iter()
+        .filter(|(_, v)| !v.is_null())
+        .filter(|(k, _)| {
+            let mut probe = fields.clone();
+            probe.insert((*k).clone(), Value::Null);
+            parse(&Value::Object(probe)).is_some_and(|e| Some(e) == parsed)
+        })
+        .map(|(k, _)| k.as_str())
+        .collect();
+    if ignored.is_empty() {
+        return Ok(());
+    }
+    let takes = parsed.and_then(|e| serde_json::to_value(e).ok()).map(crate::inspect::camel).unwrap_or_default();
+    let kind = takes.get("type").and_then(Value::as_str).unwrap_or("effect").to_string();
+    let names: Vec<&str> = takes.as_object().into_iter().flatten().map(|(k, _)| k.as_str()).collect();
+    Err(bad(cmd, format!("{at}: unknown properties: {} (a {kind} takes {})", ignored.join(", "), names.join(", "))))
 }
 
 pub(crate) fn enum_of<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
@@ -362,6 +411,12 @@ pub const LAYOUT_KEYS: &[&str] = &[
     "gridRowTracks",
 ];
 
+/// Drop the bindings of auto layout fields (gap, padding…): they go with the auto layout, or
+/// re-applying them would bring it back.
+pub fn drop_layout_bindings(n: &mut Node) {
+    n.bound.retain(|k, _| !LAYOUT_KEYS.contains(&k.as_str()));
+}
+
 /// The auto layout of a frame-like node, created when it has none yet. Other nodes can't hold an
 /// auto layout: an auto layout key on them is refused, not stored where nothing reads it
 /// (`node.set` on several layers skips them instead, see `edit::set`).
@@ -439,23 +494,63 @@ pub fn layout_position_warning(doc: &Document, ids: &[NodeId]) -> Option<String>
     ))
 }
 
+/// Replace a node's fills (or strokes). Bindings on the paints whose bound values the new list
+/// changed let go, as an explicit edit does (see `lists::rebind_edited_paint`).
+fn set_paints(n: &mut Node, fills: bool, paints: Vec<Paint>) {
+    let old = std::mem::replace(if fills { &mut n.fills } else { &mut n.strokes }, paints);
+    for (i, p) in old.iter().enumerate() {
+        super::lists::rebind_edited_paint(n, fills, i, p);
+    }
+}
+
+/// `"none"` (either case) and null ask for no paint, as an empty `fills`/`strokes` list does.
+fn paint_none(v: &Value) -> bool {
+    v.is_null() || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none"))
+}
+
+/// The order [`apply`] takes keys in: geometry first so rotation applies to the final size, style
+/// links after the values so a link wins over values its style sets, variable bindings last so
+/// paints set in the same call don't detach them.
+fn apply_order(k: &str) -> u8 {
+    match k {
+        "path" | "width" | "height" | "w" | "h" => 0,
+        "rotation" => 2,
+        "x" | "y" => 3,
+        "fillStyle" | "strokeStyle" | "effectStyle" | "textStyle" | "gridStyle" => 4,
+        "boundVariables" => 5,
+        _ => 1,
+    }
+}
+
+/// An explicit width (`is_w`) or height makes hugging or filling on that axis fixed, like typing
+/// into W or H.
+fn fix_axis(doc: &mut Document, id: NodeId, is_w: bool) -> Result<()> {
+    let n = doc.get_mut(id)?;
+    if is_w {
+        n.child_layout.sizing_h = Sizing::Fixed;
+    } else {
+        n.child_layout.sizing_v = Sizing::Fixed;
+    }
+    Ok(())
+}
+
 /// Apply a property map to one node. `x`/`y` are relative to the parent.
 pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Value>) -> Result<()> {
     let mut unknown = Vec::new();
-    // Geometry keys first so rotation applies to the final size.
-    let order = |k: &str| match k {
-        "width" | "height" | "w" | "h" => 0,
-        "rotation" => 2,
-        "x" | "y" => 3,
-        _ => 1,
-    };
     let mut keys: Vec<(&String, &Value)> = props.iter().collect();
-    keys.sort_by_key(|(k, _)| order(k));
+    keys.sort_by_key(|(k, _)| apply_order(k));
+    // Where a new `path` had its own box, for `x`/`y` in the same call (as `node.create` places it).
+    let mut path_offset = (0.0, 0.0);
     for (k, v) in keys {
         let k = k.as_str();
         match k {
+            "path" => path_offset = set_path(cmd, doc, id, v, props)?,
+            // A new path takes the size asked for as its scale (`set_path`); the size still fixes
+            // its auto layout axis.
+            "width" | "height" | "w" | "h" if props.contains_key("path") => fix_axis(doc, id, k.starts_with('w'))?,
             "x" | "y" => {
                 let val = f64_of(v).ok_or_else(|| bad(cmd, format!("`{k}` must be a number")))?;
+                let val = val + if k == "x" { path_offset.0 } else { path_offset.1 };
                 // X/Y are the node's own origin (its rotated top-left for rotated nodes), in the
                 // frame it is in (groups have no space of their own).
                 let n = doc.get(id)?;
@@ -497,13 +592,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                         TextAutoResize::None
                     };
                 }
-                // Explicit width/height makes hugging/filling fixed (like typing into W/H).
-                let n = doc.get_mut(id)?;
-                if is_w {
-                    n.child_layout.sizing_h = Sizing::Fixed;
-                } else {
-                    n.child_layout.sizing_v = Sizing::Fixed;
-                }
+                fix_axis(doc, id, is_w)?;
             }
             "rotation" => {
                 let deg = f64_of(v).ok_or_else(|| bad(cmd, "`rotation` must be degrees"))?;
@@ -518,15 +607,23 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 let b = v.as_str().and_then(figcraft_color::BlendMode::from_name).ok_or_else(|| bad(cmd, "unknown blend mode"))?;
                 doc.get_mut(id)?.blend = b;
             }
-            "fills" => doc.get_mut(id)?.fills = paints_of(v, "fills").map_err(|e| bad(cmd, e))?,
+            "fills" => set_paints(doc.get_mut(id)?, true, paints_of(v, "fills").map_err(|e| bad(cmd, e))?),
             "fill" => {
-                let c = color_of(v).ok_or_else(|| bad(cmd, "`fill` must be a colour"))?;
-                doc.get_mut(id)?.fills = vec![Paint::solid(c)];
+                if paint_none(v) {
+                    set_paints(doc.get_mut(id)?, true, vec![]);
+                } else {
+                    let c = color_of(v).ok_or_else(|| bad(cmd, "`fill` must be a colour, \"none\" or null"))?;
+                    set_paints(doc.get_mut(id)?, true, vec![Paint::solid(c)]);
+                }
             }
-            "strokes" => doc.get_mut(id)?.strokes = paints_of(v, "strokes").map_err(|e| bad(cmd, e))?,
+            "strokes" => set_paints(doc.get_mut(id)?, false, paints_of(v, "strokes").map_err(|e| bad(cmd, e))?),
             "stroke" => {
-                let c = color_of(v).ok_or_else(|| bad(cmd, "`stroke` must be a colour"))?;
-                doc.get_mut(id)?.strokes = vec![Paint::solid(c)];
+                if paint_none(v) {
+                    set_paints(doc.get_mut(id)?, false, vec![]);
+                } else {
+                    let c = color_of(v).ok_or_else(|| bad(cmd, "`stroke` must be a colour, \"none\" or null"))?;
+                    set_paints(doc.get_mut(id)?, false, vec![Paint::solid(c)]);
+                }
             }
             "strokeWeight" => doc.get_mut(id)?.stroke.weight = number_in_range(cmd, k, v)?,
             "strokeAlign" => doc.get_mut(id)?.stroke.align = enum_of(v).ok_or_else(|| bad(cmd, "strokeAlign: inside|center|outside"))?,
@@ -582,7 +679,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 }
             }
             "cornerSmoothing" => doc.get_mut(id)?.corners.smoothing = number_in_range(cmd, k, v)?,
-            "effects" => doc.get_mut(id)?.effects = effects_of(&snake(v), "effects").map_err(|e| bad(cmd, e))?,
+            "effects" => doc.get_mut(id)?.effects = effects_from(cmd, v)?,
             "clip" | "clipsContent" => doc.get_mut(id)?.clip = v.as_bool().ok_or_else(|| bad(cmd, "`clip` must be a boolean"))?,
             "isMask" => doc.get_mut(id)?.is_mask = v.as_bool().unwrap_or(false),
             "devStatus" => {
@@ -591,8 +688,12 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 } else {
                     v.as_str().and_then(|s| DevStatus::ALL.into_iter().find(|d| d.id().eq_ignore_ascii_case(s)))
                 };
+                let st = st.ok_or_else(|| bad(cmd, "devStatus: none|readyForDev|completed"))?;
+                if !st.is_none() && !crate::devinspect::has_status(doc, id) {
+                    return Err(bad(cmd, "devStatus: only sections and frames at the top of a page or section take one"));
+                }
                 let n = doc.get_mut(id)?;
-                n.dev_status = st.ok_or_else(|| bad(cmd, "devStatus: none|readyForDev|completed"))?;
+                n.dev_status = st;
                 // Marking a layer (again) starts from its current contents.
                 n.dev_changed = false;
             }
@@ -606,8 +707,14 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                     return Err(bad(cmd, "auto layout needs a frame"));
                 }
                 match v {
-                    Value::Null => n.layout = None,
-                    Value::String(s) if s.eq_ignore_ascii_case("none") => n.layout = None,
+                    Value::Null => {
+                        n.layout = None;
+                        drop_layout_bindings(n);
+                    }
+                    Value::String(s) if s.eq_ignore_ascii_case("none") => {
+                        n.layout = None;
+                        drop_layout_bindings(n);
+                    }
                     Value::String(s) => {
                         let mode = match s.to_ascii_lowercase().as_str() {
                             "horizontal" | "row" => LayoutMode::Horizontal,
@@ -895,10 +1002,15 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                     for (field, var) in o {
                         match var.as_str() {
                             Some(vid) => {
+                                if n.bound.get(field).map(String::as_str) != Some(vid) {
+                                    crate::cmd::styles::rebind_paint_alpha(&mut n.fills, &mut n.strokes, field, true);
+                                }
                                 n.bound.insert(field.clone(), vid.to_string());
                             }
                             None => {
-                                n.bound.remove(field);
+                                if n.bound.remove(field).is_some() {
+                                    crate::cmd::styles::rebind_paint_alpha(&mut n.fills, &mut n.strokes, field, false);
+                                }
                             }
                         }
                     }
@@ -965,6 +1077,33 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
         }
     }
     Ok(())
+}
+
+/// Replace vector `id`'s geometry with SVG path data `v`, as `node.create` reads it: `width`/`height`
+/// in the same call scale it, and the path's own box goes at the layer's origin, which keeps its
+/// place, rotation and everything else. Returns where the path's own box was, which `x`/`y` in the
+/// same call add (so `{path, x: 0, y: 0}` places it as `node.create` does). Layers inside an
+/// instance are refused: their geometry comes from the main component, and a sync would undo it.
+fn set_path(cmd: &str, doc: &mut Document, id: NodeId, v: &Value, props: &Map<String, Value>) -> Result<(f64, f64)> {
+    let d = v.as_str().ok_or_else(|| bad(cmd, "`path` must be SVG path data (a string)"))?;
+    let n = doc.get(id)?;
+    if !matches!(n.kind, NodeKind::Vector { .. }) {
+        return Err(bad(cmd, format!("`path` applies to vector layers, and layer {} “{}” is a {}", n.id, n.name, n.kind.type_name())));
+    }
+    if crate::components::inside_instance(doc, id) {
+        return Err(bad(cmd, format!("`path`: layer {} “{}” is inside an instance: edit its main component, or detach the instance", n.id, n.name)));
+    }
+    let size = |long: &str, short: &str| -> Result<Option<f64>> {
+        props.get(long).or_else(|| props.get(short)).map(|v| f64_of(v).ok_or_else(|| bad(cmd, format!("`{long}` must be a number")))).transpose()
+    };
+    let shape = super::create::path_network(cmd, d, size("width", "w")?, size("height", "h")?)?;
+    let n = doc.get_mut(id)?;
+    if let NodeKind::Vector { network } = &mut n.kind {
+        *network = shape.network;
+    }
+    n.width = shape.width;
+    n.height = shape.height;
+    Ok(shape.offset)
 }
 
 /// The override group a property key belongs to.

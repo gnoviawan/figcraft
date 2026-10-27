@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use egui::{Align2, Color32, Context, CornerRadius, RichText, Sense, Stroke, vec2};
+use egui::{Align2, Context, CornerRadius, RichText, Sense, Stroke, vec2};
 use figcraft_color::ColorProfile;
 use figcraft_doc::{ExportFormat, ExportSetting, ExportSize, NodeId};
 use figcraft_engine::cmd::file::{export_jobs, exportable_layers};
@@ -13,8 +13,7 @@ use crate::FigApp;
 use crate::brand;
 use crate::export_panel::{export_layers, save_one, suggested_name};
 use crate::i18n::{self, tr, tr_noop, trf, trn};
-use crate::icons::{self, Icon};
-use crate::theme::{ACCENT, Tokens, regular, semibold};
+use crate::theme::{Tokens, regular, semibold};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -124,11 +123,15 @@ fn about_body(ui: &mut egui::Ui, t: &Tokens) {
     ui.horizontal(|ui| {
         if !brand::REBRANDED {
             let (r, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
-            ui.painter().rect_filled(r, CornerRadius::same(10), ACCENT);
-            icons::paint(ui.painter(), r.shrink(10.0), Icon::Logo, Color32::WHITE);
+            crate::theme::paint_app_icon(ui, r);
         }
         ui.vertical(|ui| {
-            ui.label(RichText::new(brand::NAME).font(semibold(18.0)));
+            if brand::REBRANDED {
+                ui.label(RichText::new(brand::NAME).font(semibold(18.0)));
+            } else {
+                let (wordmark, _) = ui.allocate_exact_size(vec2(130.0, 23.0), Sense::hover());
+                crate::theme::paint_wordmark(ui.painter(), egui::pos2(wordmark.min.x, wordmark.center().y), 18.0, t);
+            }
             ui.label(RichText::new(trf("Version {version}", &[("version", &VERSION)])).color(t.text_secondary));
         });
     });
@@ -151,14 +154,19 @@ fn about_body(ui: &mut egui::Ui, t: &Tokens) {
 }
 
 /// Escape closes the topmost simple dialog (one without menus of its own), before the canvas's
-/// shortcuts see it (it doesn't deselect), like a system dialog: from one of its fields too.
+/// shortcuts see it (it doesn't deselect), like a system dialog: from one of its fields too. A menu
+/// open over the dialog (Preferences ▸ Interface size) takes the first Escape and closes alone.
 pub fn keys(app: &mut FigApp, ctx: &Context) {
+    if egui::Popup::is_any_open(ctx) {
+        return;
+    }
     let u = &mut app.ui;
     let open = u.color_profile.is_some()
         || u.menu_input.is_some()
         || u.find.is_some()
         || u.batch_rename.is_some()
         || u.import_report.is_some()
+        || u.missing_fonts.is_some()
         || u.confirm_close
         || u.export_preview
         || u.shortcuts_panel
@@ -172,6 +180,7 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
         || u.find.take().is_some()
         || u.batch_rename.take().is_some()
         || u.import_report.take().is_some()
+        || u.missing_fonts.take().is_some()
     {
         return;
     }
@@ -186,6 +195,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     // Dropped files waiting to open: their card, then (once it has shown) the files.
     crate::pending_open::pending_opens(app, ctx);
     crate::import_report::show(app, ctx);
+    crate::missing_fonts::show(app, ctx);
     let t = Tokens::get(ctx);
     if app.ui.about {
         let mut open = true;
@@ -227,6 +237,9 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
             // The browser has no files to save to.
             if !cfg!(target_arch = "wasm32") && crate::widgets::checkbox(ui, prefs.auto_save, tr("Save files automatically")) {
                 toggles.push("pref.autoSave");
+            }
+            if !cfg!(target_arch = "wasm32") && crate::widgets::checkbox(ui, prefs.start_on_home, tr("Start on the Home screen")) {
+                toggles.push("pref.startOnHome");
             }
             for c in toggles {
                 app.run(c, json!({}));
@@ -277,6 +290,8 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                     app.run("pref.nudge", json!({"small": small, "big": big}));
                 }
             });
+            ui.add_space(8.0);
+            interface_size(app, ui, prefs.ui_scale);
             if app.theme_toggle_shown() {
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -480,6 +495,76 @@ pub(crate) fn batch_rename_params(b: &BatchRenameUi) -> serde_json::Value {
         p["replace"] = json!(b.to);
     }
     p
+}
+
+/// Preferences ▸ Interface size: a size relative to the system's display scale (100 % is the
+/// system's own), as a drop-down that takes effect at once. The browser has its own zoom, so there
+/// the row only says so.
+fn interface_size(app: &mut FigApp, ui: &mut egui::Ui, chosen: f64) {
+    let t = Tokens::get(ui.ctx());
+    if cfg!(target_arch = "wasm32") {
+        ui.label(tr("Interface size"));
+        crate::widgets::label(ui, tr("Use your browser's zoom to change the interface size."), t.text_secondary);
+        return;
+    }
+    let percent = |size: f64| trf("{percent}%", &[("percent", &crate::ui_scale::percent(size as f32))]);
+    let shown = percent(chosen);
+    ui.horizontal(|ui| {
+        ui.label(tr("Interface size"));
+        let resp = crate::widgets::dropdown(ui, &shown, 120.0, None);
+        crate::a11y::combo(&resp, tr("Interface size"), &shown, crate::a11y::menu_open(&resp));
+        crate::right::menu_popup(&resp).show(|ui| {
+            let focused = ui.memory(|memory| memory.focused());
+            let step = ui.input(|input| {
+                if input.key_pressed(egui::Key::ArrowDown) || (input.key_pressed(egui::Key::Tab) && !input.modifiers.shift) {
+                    1
+                } else if input.key_pressed(egui::Key::ArrowUp) || (input.key_pressed(egui::Key::Tab) && input.modifiers.shift) {
+                    -1
+                } else {
+                    0
+                }
+            });
+            let mut rows = Vec::with_capacity(crate::ui_scale::SIZES.len());
+            for size in crate::ui_scale::SIZES {
+                let label = percent(size);
+                let selected = (chosen - size).abs() < 1e-6;
+                let row = crate::right::menu_row(ui, &format!("{}{label}", if selected { "✓ " } else { "    " }), "", 0.0, |_, _, _| {});
+                crate::a11y::menu_item(&row, &label, "", Some(selected));
+                if row.has_focus() {
+                    ui.memory_mut(|memory| memory.set_focus_lock_filter(row.id, egui::EventFilter { tab: true, ..Default::default() }));
+                }
+                rows.push(row.id);
+                if row.clicked() {
+                    app.run("pref.uiScale", json!({"scale": size}));
+                    ui.close();
+                }
+            }
+            // Spatial focus can jump to a control behind the popup when the menu overlaps the
+            // Preferences window. Once an item is focused, walk the menu's own rows instead.
+            if step != 0
+                && let Some(index) = rows.iter().position(|id| Some(*id) == focused)
+            {
+                let next = index.saturating_add_signed(step).min(rows.len() - 1);
+                ui.memory_mut(|memory| {
+                    memory.request_focus(rows[next]);
+                    memory.move_focus(egui::FocusDirection::None);
+                });
+            }
+        });
+    });
+    crate::widgets::label(
+        ui,
+        tr("Relative to your system's display scaling (100% is the system's own size). Document zoom is separate."),
+        t.text_secondary,
+    );
+    // Said in words, not only by the menu's value: the window is too small for the size chosen.
+    if app.ui.ui_scale.limited {
+        let note = trf(
+            "The window is too small for {size}%, so the interface is drawn at {drawn}%. Make the window larger to use {size}%.",
+            &[("size", &crate::ui_scale::percent(chosen as f32)), ("drawn", &crate::ui_scale::percent(app.ui.ui_scale.zoom))],
+        );
+        crate::widgets::label(ui, &note, t.text_secondary);
+    }
 }
 
 /// Rename layers: Match, Rename to with buttons for the current name and numbers, where numbers

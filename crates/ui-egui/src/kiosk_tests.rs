@@ -317,3 +317,39 @@ fn about_keeps_its_attribution_and_shows_the_artcraft_mark_only_in_an_upstream_b
         assert!(shown.contains("getartcraft.com/apps/figcraft") && shown.contains("Discord"), "{shown}");
     }
 }
+
+/// A document dropped on a kiosk's canvas doesn't open: it would go in front of the host's own,
+/// behind a tab bar the kiosk hides, and the host would save whichever document is in front.
+#[test]
+fn kiosk_opens_no_dropped_document() {
+    let saved = std::env::temp_dir().join(format!("figcraft-kiosk-drop-{}.figcraft", std::process::id()));
+    Session::new().execute("file.saveAs", &json!({"path": saved.to_string_lossy()})).unwrap();
+    let bytes = std::fs::read(&saved).unwrap();
+    let _ = std::fs::remove_file(&saved);
+    for (shell, docs) in [(Shell::Kiosk, 1), (Shell::Full, 2)] {
+        let mut u = ui(shell);
+        u.app.ui.home = false;
+        u.frame(vec![]);
+        let pos = u.app.canvas.rect.center();
+        let file: egui::DroppedFileHandle = std::sync::Arc::new(DroppedBytes(bytes.clone()));
+        u.frame_raw(egui::RawInput { events: vec![Event::PointerMoved(pos)], dropped_files: vec![file], ..Default::default() });
+        for _ in 0..3 {
+            u.frame(vec![]);
+        }
+        assert_eq!(u.app.session.docs.len(), docs, "{shell:?}");
+    }
+}
+
+/// A document dropped from the browser: its contents, no file on disk.
+#[derive(Debug)]
+struct DroppedBytes(Vec<u8>);
+
+impl egui::DroppedFile for DroppedBytes {
+    fn path(&self) -> &std::path::Path {
+        std::path::Path::new("Shared.figcraft")
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        Ok(self.0.clone())
+    }
+}

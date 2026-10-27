@@ -8,6 +8,7 @@
 pub mod a11y;
 pub mod assets_panel;
 pub mod bidi;
+pub mod board_bar;
 pub mod branch_ui;
 pub mod brand;
 pub mod canvas;
@@ -43,6 +44,7 @@ pub mod live;
 pub mod live_text;
 pub mod measure_overlay;
 pub mod menus;
+pub mod missing_fonts;
 pub mod online;
 pub mod pending_open;
 pub mod plugins_ui;
@@ -63,6 +65,7 @@ pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 pub mod typography;
+pub mod ui_scale;
 pub mod variable_ui;
 pub mod variables_panel;
 pub mod vector_panel;
@@ -70,6 +73,8 @@ pub mod versions;
 pub mod widgets;
 pub mod windows;
 
+#[cfg(test)]
+mod board_ui_tests;
 #[cfg(test)]
 mod theme_startup_tests;
 
@@ -88,17 +93,23 @@ mod canvas_fixes_tests;
 #[cfg(test)]
 mod canvas_image_rect_tests;
 #[cfg(test)]
+mod colorpicker_eyedropper_tests;
+#[cfg(test)]
 mod colorpicker_selection_tests;
 #[cfg(test)]
 mod comments_tests;
 #[cfg(test)]
 mod component_props_reorder_tests;
 #[cfg(test)]
+mod corner_individual_tests;
+#[cfg(test)]
 mod cursors_tests;
 #[cfg(test)]
 mod design_paste_tests;
 #[cfg(test)]
 mod dev_mode_tests;
+#[cfg(test)]
+mod devmode_tail_tests;
 #[cfg(test)]
 mod duplicate_paint_tests;
 #[cfg(test)]
@@ -121,6 +132,8 @@ mod home_recents_tests;
 mod home_tests;
 #[cfg(test)]
 mod idle_tests;
+#[cfg(test)]
+mod ime_tests;
 #[cfg(test)]
 mod import_report_tests;
 #[cfg(test)]
@@ -150,13 +163,21 @@ mod live_tests;
 #[cfg(test)]
 mod live_text_tests;
 #[cfg(test)]
+mod measure_nudge_tests;
+#[cfg(test)]
 mod menu_aim_tests;
 #[cfg(test)]
+mod menu_contrast_tests;
+#[cfg(test)]
 mod menu_input_tests;
+#[cfg(test)]
+mod missing_fonts_tests;
 #[cfg(test)]
 mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
+#[cfg(test)]
+mod padding_individual_tests;
 #[cfg(test)]
 mod palette_tests;
 #[cfg(test)]
@@ -177,6 +198,10 @@ mod plugin_panel_tests;
 mod plugins_browse_tests;
 #[cfg(test)]
 mod popup_width_tests;
+#[cfg(test)]
+mod present_links_tests;
+#[cfg(test)]
+mod present_tab_tests;
 #[cfg(test)]
 mod present_tests;
 #[cfg(test)]
@@ -204,9 +229,13 @@ mod text_enter_tests;
 #[cfg(test)]
 mod titlebar_tests;
 #[cfg(test)]
+mod ui_scale_tests;
+#[cfg(test)]
 mod variables_export_ui_tests;
 #[cfg(test)]
 mod variables_rename_tests;
+#[cfg(test)]
+mod variants_discovery_tests;
 #[cfg(test)]
 mod vector_panel_tests;
 #[cfg(test)]
@@ -219,6 +248,7 @@ mod windows_qa_tests;
 mod windows_tests;
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -236,6 +266,11 @@ pub use kiosk::Shell;
 pub trait Services {
     fn pick_open(&mut self, _title: &str, _exts: &[&str]) -> DialogFuture {
         Box::pin(std::future::ready(None))
+    }
+    /// Pick a file and read it, where the platform hands over a file's name and contents rather
+    /// than a path to it (the browser). `None`: the platform picks paths ([`Services::pick_open`]).
+    fn pick_open_contents(&mut self, _title: &str, _exts: &[&str]) -> Option<ContentsFuture> {
+        None
     }
     fn pick_save(&mut self, _title: &str, _name: &str, _exts: &[&str]) -> DialogFuture {
         Box::pin(std::future::ready(None))
@@ -291,14 +326,61 @@ pub trait Services {
 }
 
 pub type DialogFuture = Pin<Box<dyn Future<Output = Option<PathBuf>>>>;
-type DialogDone = Box<dyn FnOnce(&mut FigApp, PathBuf)>;
+/// A picked file's name and contents ([`Services::pick_open_contents`]); `None` when the picker
+/// was cancelled, `Err` with what to tell the user when the file couldn't be read.
+pub type ContentsFuture = Pin<Box<dyn Future<Output = Option<Result<(String, Vec<u8>), String>>>>>;
+/// A dropped file's contents, read once they arrive (`Err`: what to tell the user when they
+/// couldn't be read).
+pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>>>>;
+type PickFuture = Pin<Box<dyn Future<Output = Option<Picked>>>>;
+type DialogDone = Box<dyn FnOnce(&mut FigApp, Picked)>;
+
+/// What a dialog picked: a path, or a file's name and contents where there are no paths, or why
+/// the picked file couldn't be read.
+enum Picked {
+    Path(PathBuf),
+    Contents(String, Vec<u8>),
+    Unreadable(String),
+}
+
+impl Picked {
+    /// The file as `file.open` and `file.import` take it (`Err`: what to tell the user instead).
+    fn file_params(self) -> Result<Value, String> {
+        match self {
+            Picked::Path(p) => Ok(json!({"path": p.to_string_lossy()})),
+            Picked::Contents(name, bytes) => {
+                use base64::Engine as _;
+                Ok(json!({"data": base64::engine::general_purpose::STANDARD.encode(&bytes), "name": name}))
+            }
+            Picked::Unreadable(why) => Err(why),
+        }
+    }
+}
+
+/// What the user is told about a file whose contents couldn't be read.
+pub fn unreadable(name: &str) -> String {
+    i18n::trf("Couldn't read {name}.", &[("name", &name)])
+}
+
+/// The largest file read in the browser: wasm has at most 4 GiB of memory, and a file's contents
+/// are held about three times on their way to `file.open` (the bytes, base64, decoded again).
+/// As large as one member of a `.figcraft` file may be.
+const MAX_BROWSER_FILE: f64 = (512u64 << 20) as f64;
+
+/// Checks a file of `size` bytes before the browser reads it (`Err`: what to tell the user).
+pub fn browser_can_read(name: &str, size: f64) -> Result<(), String> {
+    if size.is_nan() || size > MAX_BROWSER_FILE {
+        return Err(i18n::trf("{name} is too large to open in the browser (over 512 MB).", &[("name", &name)]));
+    }
+    Ok(())
+}
 
 /// A native dialog in flight. The app keeps working while it is open, so its result goes to the
 /// file and window it was opened for, not to whichever is in front when it closes.
 struct PendingDialog {
-    future: DialogFuture,
-    /// The path picked, kept until the window that holds `doc` draws.
-    path: Option<PathBuf>,
+    future: PickFuture,
+    /// What was picked, kept until the window that holds `doc` draws.
+    picked: Option<Picked>,
     done: DialogDone,
     /// The file it acts on (`None`: none, such as Open).
     doc: Option<u64>,
@@ -409,15 +491,16 @@ pub const PANEL_DEFAULT: f32 = 240.0;
 pub const CANVAS_MIN: f32 = 160.0;
 
 /// The widths the side panels are drawn at in `avail` points (the window less the icon rail), from
-/// the widths asked for (`left`: none while it is closed): each within its limits, and narrower
-/// in a small window so the canvas keeps [`CANVAS_MIN`] (the right panel gives way last).
-pub fn fit_panels(avail: f32, left: Option<f32>, right: f32) -> (f32, f32) {
+/// the widths asked for (none while a panel is closed, which takes no room): each within its
+/// limits, and narrower in a small window so the canvas keeps [`CANVAS_MIN`] (the right panel
+/// gives way last).
+pub fn fit_panels(avail: f32, left: Option<f32>, right: Option<f32>) -> (f32, f32) {
     let fit = |w: f32, range: &std::ops::RangeInclusive<f32>, room: f32| {
         let w = if w.is_finite() { w } else { PANEL_DEFAULT };
         w.clamp(*range.start(), room.clamp(*range.start(), *range.end()))
     };
     let left_min = left.map_or(0.0, |_| *LEFT_PANEL.start());
-    let right = fit(right, &RIGHT_PANEL, avail - left_min - CANVAS_MIN);
+    let right = right.map_or(0.0, |r| fit(r, &RIGHT_PANEL, avail - left_min - CANVAS_MIN));
     (left.map_or(0.0, |l| fit(l, &LEFT_PANEL, avail - right - CANVAS_MIN)), right)
 }
 
@@ -432,12 +515,19 @@ pub struct UiState {
     pub last_right_tab: RightTab,
     pub left_tab: LeftTab,
     pub pages_open: bool,
+    /// Pages panel search: open, and the case-insensitive name filter.
+    pub page_search: bool,
+    pub page_filter: String,
     /// The height asked for the pages list (`None`: a share of the panel).
     pub pages_height: Option<f32>,
+    /// The document and active page last drawn in the pages list.
+    pub pages_seen_page: Option<(u64, NodeId)>,
     pub expanded: BTreeSet<NodeId>,
     /// The layer being renamed in the layers panel.
     pub rename: Option<layers::Rename>,
     pub rename_page: Option<(NodeId, String)>,
+    /// The frame or section whose name label on the canvas is being renamed (a double-click on it).
+    pub rename_label: Option<layers::Rename>,
     pub main_menu: bool,
     pub palette: Option<String>,
     /// The Actions palette's tab.
@@ -458,6 +548,9 @@ pub struct UiState {
     pub menu_input: Option<dialogs::MenuInput>,
     /// File ▸ Rename: the file name in the left panel starts its inline rename on the next frame.
     pub rename_file: bool,
+    /// What the interface size drew last frame and whether the window held it back. Set by
+    /// [`FigApp::logic`] for the main window.
+    pub ui_scale: ui_scale::Plan,
     pub shortcuts_panel: bool,
     /// The Keyboard shortcuts panel's tab and search text.
     pub shortcuts_tab: figcraft_engine::keymap::Group,
@@ -474,10 +567,10 @@ pub struct UiState {
     /// A message at the bottom of the window and how long it has been showing.
     pub toast: Option<(String, ToastClock)>,
     pub present: Option<present::Presenter>,
-    /// A presentation kept alive while its design tab or Home is in front.
-    pub paused_present: Option<present::Presenter>,
-    /// The file that owns the presentation tab.
-    pub present_uid: Option<u64>,
+    pub presents: Vec<present::PresentTab>,
+    /// The tab shown last. It is on screen while `present` has a value.
+    pub present_active: Option<u64>,
+    pub present_next: u64,
     /// The full-window presenter's options (how it sizes the prototype), kept between
     /// presentations.
     pub present_view: present::PresentView,
@@ -499,6 +592,10 @@ pub struct UiState {
     /// The layers panel has the keyboard: arrow keys move through its rows instead of nudging
     /// (set by a click on a row, cleared by a press on the canvas).
     pub layers_focus: bool,
+    /// The file (its `uid`) whose pages list has the keyboard: Delete with no layers selected deletes
+    /// its current page (set by a click on a page row or the add-page button, cleared by a click on a
+    /// layer row or a press on the canvas).
+    pub pages_focus: Option<u64>,
     pub layers_seen_sel: Vec<NodeId>,
     pub dark: bool,
     /// Colours an embedding host set (`host.theme`): while set, they replace the theme preference.
@@ -507,6 +604,8 @@ pub struct UiState {
     pub host_location: Option<String>,
     pub follow_system: bool,
     pub tool_flyout: Option<&'static str>,
+    /// On a board: the Design panel is shown (boards hide it until asked for).
+    pub board_panel: bool,
     pub last_error: Option<String>,
     /// Files dropped on the home screen or the canvas, opened once their card has been on screen
     /// ([`pending_open::pending_opens`]), and the frames it has been drawn.
@@ -514,6 +613,9 @@ pub struct UiState {
     pub pending_open_frames: u8,
     /// The latest successful file import's summary and compatibility notes.
     pub import_report: Option<import_report::Report>,
+    /// Files the user opened whose fonts are yet to be checked (by document uid).
+    pub font_checks: Vec<u64>,
+    pub missing_fonts: Option<missing_fonts::Shown>,
     pub screenshot_requests: Vec<(u64, String)>,
     pub frame_ms: f64,
     pub render_ms: f64,
@@ -558,6 +660,9 @@ pub struct UiState {
     pub paste_event: bool,
     /// The window got the focus back since the last V release.
     pub refocused: bool,
+    /// A save shortcut pressed while a panel field had the keyboard: the field lets go (which
+    /// commits what was typed) and the command runs the next frame (`shortcuts::handle`).
+    pub after_field: Option<&'static str>,
     /// The modifiers held, as of the last modifier change in the raw events: a paste event doesn't
     /// carry them.
     pub held: egui::Modifiers,
@@ -586,6 +691,12 @@ pub struct UiState {
     pub online: online::OnlineUi,
     /// The window was asked to close with unsaved changes: the question shows.
     pub confirm_close: bool,
+    /// The file a Save as started from the unsaved-changes question is saving: the window closes
+    /// once it is saved, and stays open if the dialog is cancelled or the save fails.
+    pub close_after_save_as: Option<u64>,
+    /// Save was answered: the files save next frame, once a panel field the click took the
+    /// keyboard from has committed what was typed (as [`UiState::after_field`]).
+    pub save_on_close: bool,
 }
 
 impl Default for UiState {
@@ -597,10 +708,14 @@ impl Default for UiState {
             last_right_tab: RightTab::Design,
             left_tab: LeftTab::File,
             pages_open: true,
+            page_search: false,
+            page_filter: String::new(),
             pages_height: None,
+            pages_seen_page: None,
             expanded: BTreeSet::new(),
             rename: None,
             rename_page: None,
+            rename_label: None,
             main_menu: false,
             palette: None,
             palette_tab: menus::PaletteTab::All,
@@ -613,6 +728,7 @@ impl Default for UiState {
             preferences: false,
             menu_input: None,
             rename_file: false,
+            ui_scale: ui_scale::plan(1.0, None, None),
             shortcuts_panel: false,
             shortcuts_tab: figcraft_engine::keymap::Group::Essential,
             shortcuts_query: String::new(),
@@ -623,8 +739,9 @@ impl Default for UiState {
             icon_gallery: false,
             toast: None,
             present: None,
-            paused_present: None,
-            present_uid: None,
+            presents: Vec::new(),
+            present_active: None,
+            present_next: 1,
             present_view: present::PresentView::default(),
             preview: None,
             picker: None,
@@ -635,16 +752,20 @@ impl Default for UiState {
             layer_filter: String::new(),
             layer_anchor: None,
             layers_focus: false,
+            pages_focus: None,
             layers_seen_sel: Vec::new(),
             dark: false,
             host_theme: None,
             host_location: None,
             follow_system: false,
             tool_flyout: None,
+            board_panel: false,
             last_error: None,
             pending_opens: Vec::new(),
             pending_open_frames: 0,
             import_report: None,
+            font_checks: Vec::new(),
+            missing_fonts: None,
             screenshot_requests: Vec::new(),
             frame_ms: 0.0,
             render_ms: 0.0,
@@ -671,6 +792,7 @@ impl Default for UiState {
             v_pressed: false,
             paste_event: false,
             refocused: false,
+            after_field: None,
             held: egui::Modifiers::NONE,
             next_autosave: 0.0,
             auto_save_at: None,
@@ -684,6 +806,8 @@ impl Default for UiState {
             guests: guests::Guests::default(),
             online: online::OnlineUi::default(),
             confirm_close: false,
+            close_after_save_as: None,
+            save_on_close: false,
         }
     }
 }
@@ -763,9 +887,17 @@ impl FigApp {
         }
     }
 
+    /// Dismiss the composer after a successful switch away from the Comment tool.
+    pub(crate) fn clear_comment_draft_after_tool_set(&mut self, id: &str, succeeded: bool) {
+        if id == "tool.set" && succeeded && self.session.tool.tool != figcraft_engine::tools::ToolId::Comment {
+            self.ui.comments.draft = None;
+        }
+    }
+
     /// Run a command, surfacing errors as a toast. Returns the result.
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
         let r = self.session.execute(id, &params);
+        self.clear_comment_draft_after_tool_set(id, r.is_ok());
         self.handle_ui_requests();
         r.map_err(|e| self.failed(id, &e)).ok()
     }
@@ -777,6 +909,7 @@ impl FigApp {
         if let Some(result) = &result {
             import_report::capture(self, id, &params, result);
         }
+        missing_fonts::check_later(self, id, result.as_ref());
         result
     }
 
@@ -784,6 +917,11 @@ impl FigApp {
     fn failed(&mut self, id: &str, e: &figcraft_engine::EngineError) {
         let msg = e.to_string();
         log::warn!("{id}: {msg}");
+        self.show_error(msg);
+    }
+
+    /// Show an error as a toast, kept as the last error.
+    pub(crate) fn show_error(&mut self, msg: String) {
         self.toast(msg.clone());
         self.ui.last_error = Some(msg);
     }
@@ -850,6 +988,22 @@ impl FigApp {
         }
     }
 
+    /// Dev Mode (the Inspect tab): the canvas measures on hover without Alt and edits nothing;
+    /// entering it ends editing text or vectors.
+    fn sync_dev_mode(&mut self) {
+        let dev = self.ui.right_tab == RightTab::Inspect;
+        if dev && !self.session.tool.dev_mode {
+            let _ = self.session.drop_gesture();
+            let editing = self.session.ds().map(|d| (d.text_edit.is_some(), d.vector_edit.is_some())).unwrap_or_default();
+            for (on, cmd) in [(editing.0, "text.edit.end"), (editing.1, "vector.edit.end")] {
+                if on {
+                    self.run(cmd, json!({}));
+                }
+            }
+        }
+        self.session.tool.dev_mode = dev;
+    }
+
     /// Leaving Design ends a pen path as Escape does and goes back to Move: Prototype and Inspect
     /// don't draw (#307). Checked as the frame starts (the control channel) and after the panels
     /// and shortcuts (the mode switcher, the tabs, Shift+E/Shift+D), before the canvas sees more.
@@ -894,9 +1048,18 @@ impl FigApp {
                     self.ui.about_tab = dialogs::AboutTab::About;
                 }
                 "dialog.preferences" => self.ui.preferences = true,
+                "dialog.missingFonts" => missing_fonts::request(self),
                 "panel.shortcuts" => self.ui.shortcuts_panel = !self.ui.shortcuts_panel,
                 "palette.actions" => menus::toggle_palette(&mut self.ui),
+                "panel.design" if self.session.doc().is_ok_and(figcraft_engine::board::is_board) => self.ui.board_panel = !self.ui.board_panel,
                 "panel.design" => self.ui.right_tab = RightTab::Design,
+                "board.editText" => {
+                    if let Some(id) = r.data.get("id").and_then(figcraft_engine::params::id_of)
+                        && let Err(e) = figcraft_engine::board::edit_text(&mut self.session, id)
+                    {
+                        self.toast(e.to_string());
+                    }
+                }
                 "panel.prototype" => self.ui.right_tab = RightTab::Prototype,
                 "panel.designPrototype" => {
                     self.ui.right_tab = if self.ui.right_tab == RightTab::Prototype { RightTab::Design } else { RightTab::Prototype };
@@ -924,7 +1087,7 @@ impl FigApp {
                 }
                 "panel.versionHistory" => versions::open(self),
                 "view.devCompare" => {
-                    self.ui.dev.compare = r.data.get("id").and_then(figcraft_engine::params::id_of).map(dev_compare::CompareView::new);
+                    self.ui.dev.compare = dev_compare::CompareView::requested(&r.data);
                 }
                 "panel.libraries" => {
                     self.ui.left_tab = LeftTab::Assets;
@@ -945,12 +1108,7 @@ impl FigApp {
                 "dialog.colorProfile" => self.ui.color_profile = self.session.doc().ok().map(|d| d.color_profile),
                 "present" => {
                     if let Some(start) = r.data.get("start").and_then(figcraft_engine::params::id_of) {
-                        let mut p = present::Presenter::new(start);
-                        p.view = self.ui.present_view;
-                        self.ui.present = Some(p);
-                        self.ui.paused_present = None;
-                        self.ui.present_uid = self.session.docs.get(self.session.active).map(|d| d.uid);
-                        self.ui.home = false;
+                        tabs::open_present(self, start);
                     }
                 }
                 "present.options" => {
@@ -984,6 +1142,9 @@ impl FigApp {
                 "layers.collapseAll" => layers::collapse_all(self),
                 "contextMenu" => self.ui.key_menu = true,
                 "selectArea" => self.start_key_box(),
+                "canvas.renameLabel" => {
+                    self.ui.rename_label = r.data.get("id").and_then(figcraft_engine::params::id_of).map(|id| layers::Rename { id, start: true });
+                }
                 "layers.rename" => {
                     let ids: Vec<NodeId> =
                         r.data.get("ids").and_then(Value::as_array).into_iter().flatten().filter_map(figcraft_engine::params::id_of).collect();
@@ -1035,7 +1196,7 @@ impl FigApp {
         let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
         if resp.hovered() || resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            ui.painter().vline(x, rows, egui::Stroke::new(2.0, theme::Tokens::get(ui.ctx()).accent));
+            ui.painter().vline(x, rows, egui::Stroke::new(2.0, theme::ACCENT));
         }
         if resp.double_clicked() {
             return Some(PANEL_DEFAULT);
@@ -1054,7 +1215,7 @@ impl FigApp {
     pub fn save_as_dialog(&mut self) {
         let Ok(name) = self.session.doc().map(|d| d.name.clone()) else { return };
         self.pick_save(i18n::tr("Save as"), &format!("{name}.figcraft"), &["figcraft", "fig"], |app, mut p| {
-            if p.extension().is_none_or(|e| e.is_empty()) {
+            if p.extension().is_none_or(OsStr::is_empty) {
                 if !p.set_extension("figcraft") {
                     app.toast(i18n::tr("Use the .figcraft or .fig extension."));
                     return;
@@ -1071,7 +1232,7 @@ impl FigApp {
                         return;
                     }
                 }
-            } else if !p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("figcraft") || e.eq_ignore_ascii_case("fig")) {
+            } else if !p.extension().and_then(OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("figcraft") || e.eq_ignore_ascii_case("fig")) {
                 app.toast(i18n::tr("Use the .figcraft or .fig extension."));
                 return;
             }
@@ -1093,7 +1254,7 @@ impl FigApp {
             .docs
             .get(tab)
             .and_then(|d| d.path.as_deref())
-            .is_some_and(|path| !Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("fig")));
+            .is_some_and(|path| !Path::new(path).extension().and_then(OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("fig")));
         if native_path {
             if self.run("file.save", json!({})).is_some() {
                 self.toast(i18n::tr("Saved"));
@@ -1105,16 +1266,11 @@ impl FigApp {
 
     pub fn open_dialog(&mut self) {
         // Opening needs no file in front: it goes ahead even if that file closed meanwhile.
-        self.start_dialog(
-            |services| services.pick_open(i18n::tr("Open"), OPEN_EXTENSIONS),
-            false,
-            |app, p| {
-                let ps = p.to_string_lossy().to_string();
-                if app.run_user("file.open", json!({"path": ps})).is_some() {
-                    app.ui.home = false;
-                }
-            },
-        );
+        self.pick_file(i18n::tr("Open"), OPEN_EXTENSIONS, false, |app, file| {
+            if app.run_user("file.open", file).is_some() {
+                app.ui.home = false;
+            }
+        });
     }
 
     pub fn import_dialog(&mut self, place: bool) {
@@ -1124,10 +1280,33 @@ impl FigApp {
             &["svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "figcraft", "fig"]
         };
         let title = if place { i18n::tr("Place image") } else { i18n::tr("Import") };
-        self.pick_open(title, exts, move |app, p| {
-            let ps = p.to_string_lossy().to_string();
-            app.run_user("file.import", json!({"path": ps}));
+        self.pick_file(title, exts, true, |app, file| {
+            app.run_user("file.import", file);
         });
+    }
+
+    /// Pick a file to open or import; `done` gets it as `file.open` and `file.import` take it (a
+    /// path, or the name and contents where the platform has no paths). `pin`: as
+    /// [`FigApp::pick_open`]'s file in front.
+    fn pick_file(&mut self, title: &str, exts: &[&str], pin: bool, done: impl FnOnce(&mut FigApp, Value) + 'static) {
+        self.start_pick(
+            |services| -> PickFuture {
+                match services.pick_open_contents(title, exts) {
+                    Some(read) => {
+                        Box::pin(async move { read.await.map(|r| r.map_or_else(Picked::Unreadable, |(name, bytes)| Picked::Contents(name, bytes))) })
+                    }
+                    None => {
+                        let pick = services.pick_open(title, exts);
+                        Box::pin(async move { pick.await.map(Picked::Path) })
+                    }
+                }
+            },
+            pin,
+            move |app, picked| match picked.file_params() {
+                Ok(file) => done(app, file),
+                Err(why) => app.show_error(why),
+            },
+        );
     }
 
     /// Pick a file to open. `done` runs with the file in front now back in front (and not at all
@@ -1148,12 +1327,28 @@ impl FigApp {
 
     /// Open a native dialog from the window drawing now, for the file in front (`pin`).
     fn start_dialog(&mut self, start: impl FnOnce(&mut dyn Services) -> DialogFuture, pin: bool, done: impl FnOnce(&mut FigApp, PathBuf) + 'static) {
+        self.start_pick(
+            |services| -> PickFuture {
+                let pick = start(services);
+                Box::pin(async move { pick.await.map(Picked::Path) })
+            },
+            pin,
+            move |app, picked| {
+                if let Picked::Path(p) = picked {
+                    done(app, p);
+                }
+            },
+        );
+    }
+
+    /// [`FigApp::start_dialog`] for any kind of pick.
+    fn start_pick(&mut self, start: impl FnOnce(&mut dyn Services) -> PickFuture, pin: bool, done: impl FnOnce(&mut FigApp, Picked) + 'static) {
         if self.pending_dialog.is_some() || self.shell.is_kiosk() {
             return;
         }
         let doc = if pin { self.session.ds().ok().filter(|d| self.shows(d.uid)).map(|d| d.uid) } else { None };
         let future = start(self.services.as_mut());
-        self.pending_dialog = Some(PendingDialog { future, path: None, done: Box::new(done), doc, window: self.windows.current });
+        self.pending_dialog = Some(PendingDialog { future, picked: None, done: Box::new(done), doc, window: self.windows.current });
         if let Some(ctx) = &self.ui_context {
             ctx.request_repaint();
         }
@@ -1163,12 +1358,12 @@ impl FigApp {
     /// that file in front; then the tab in front before comes back (unless the dialog opened a file).
     fn poll_dialog(&mut self, ctx: &egui::Context) {
         let Some(d) = &mut self.pending_dialog else { return };
-        if d.path.is_none() {
+        if d.picked.is_none() {
             let waker = Waker::from(Arc::new(RepaintWaker(ctx.clone())));
-            let Poll::Ready(path) = d.future.as_mut().poll(&mut TaskContext::from_waker(&waker)) else { return };
-            d.path = path;
+            let Poll::Ready(picked) = d.future.as_mut().poll(&mut TaskContext::from_waker(&waker)) else { return };
+            d.picked = picked;
         }
-        let (doc, origin, picked) = (d.doc, d.window, d.path.is_some());
+        let (doc, origin, picked) = (d.doc, d.window, d.picked.is_some());
         let index = doc.map(|u| self.session.docs.iter().position(|ds| ds.uid == u));
         // Cancelled, or its file closed meanwhile.
         if !picked || index == Some(None) {
@@ -1184,12 +1379,12 @@ impl FigApp {
             ctx.request_repaint_of(windows::viewport(window));
             return;
         }
-        let Some(PendingDialog { path: Some(path), done, .. }) = self.pending_dialog.take() else { return };
+        let Some(PendingDialog { picked: Some(picked), done, .. }) = self.pending_dialog.take() else { return };
         let before = self.session.ds().ok().map(|d| d.uid);
         if let Some(Some(i)) = index {
             self.session.active = i;
         }
-        done(self, path);
+        done(self, picked);
         if doc.is_some()
             && self.session.ds().ok().map(|d| d.uid) == doc
             && let Some(i) = before.and_then(|u| self.session.docs.iter().position(|d| d.uid == u))
@@ -1203,11 +1398,11 @@ impl FigApp {
         self.session.prefs.reduce_motion || self.services.reduce_motion()
     }
 
-    /// The CJK scripts the UI shows: the language's, the language picker's (Preferences open),
+    /// The CJK and Bengali scripts the UI shows: the language's, the language picker's (Preferences open),
     /// typed text's, and those in the open file's names and comments (read when it changes, not
     /// mid-drag). Nothing is checked once every script has a face.
     fn cjk_needed(&mut self, ctx: &egui::Context, installed: u8) -> u8 {
-        if installed == cjk::KANA | cjk::HANGUL | cjk::HAN {
+        if installed == cjk::ALL {
             return installed;
         }
         let mut need = i18n::current().map_or(0, |l| cjk::language(l.code));
@@ -1266,6 +1461,16 @@ impl FigApp {
                 self.script_fonts = Some((cjk, lang));
                 theme::install_fonts(ctx, true, cjk);
             }
+        }
+        // egui's zoom is for the whole app and multiplies each window's own system scale, so the
+        // size is the same relative to every screen; the main window, whose size can hold a size
+        // back, sets it. The browser keeps its own zoom.
+        if ctx.viewport_id() == egui::ViewportId::ROOT {
+            let window_px = ctx.content_rect().size() * ctx.pixels_per_point();
+            let size = if cfg!(target_arch = "wasm32") { 1.0 } else { self.session.prefs.ui_scale };
+            let plan = ui_scale::plan(size, ctx.native_pixels_per_point(), Some((window_px.x, window_px.y)));
+            ctx.set_zoom_factor(plan.zoom);
+            self.ui.ui_scale = plan;
         }
         self.apply_theme(ctx);
         if self.worker.is_none() {
@@ -1414,10 +1619,12 @@ impl FigApp {
         // What happened in a live session (the network woke us for it).
         if self.session.live_poll() {
             if let Some(m) = self.session.message.take() {
-                self.toast(m);
+                self.toast(live::failure_text(&m));
             }
             self.background_done(&ctx);
         }
+        // Files that arrived without a command (joined, recovered) take the kept View toggles too.
+        self.session.apply_view_prefs();
         windows::begin(self, &ctx);
         let (files, prefs) = (self.session.docs.len(), self.session.prefs.clone());
         self.frame(ui);
@@ -1435,6 +1642,16 @@ impl FigApp {
         {
             self.ui.frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
         }
+    }
+
+    /// Whether the right panel shows: never with the UI `hidden`; always on a design file; on a
+    /// board, which has no prototypes or Dev Mode (its tab stays Design), only when asked for.
+    fn right_panel_shown(&mut self, hidden: bool) -> bool {
+        let board = self.session.doc().is_ok_and(figcraft_engine::board::is_board);
+        if board {
+            self.ui.right_tab = RightTab::Design;
+        }
+        !hidden && (!board || self.ui.board_panel)
     }
 
     /// One frame of the window drawing now.
@@ -1462,9 +1679,9 @@ impl FigApp {
         }
         theme::set_doc_profile(&ctx, self.session.doc().map_or(figcraft_color::ColorProfile::Srgb, |d| d.color_profile));
         widgets::set_nudge(&ctx, self.session.prefs.nudge_small, self.session.prefs.nudge_big);
-        // The Inspect tab measures on hover without Alt.
-        self.session.tool.redlines = self.ui.right_tab == RightTab::Inspect;
+        self.sync_dev_mode();
         self.end_pen_outside_design();
+        tabs::relink_presents(self);
         let kiosk = self.shell.is_kiosk();
         if kiosk {
             self.ui.home = false;
@@ -1501,6 +1718,7 @@ impl FigApp {
             return;
         }
         let hidden = self.session.ds().map(|d| d.view.ui_hidden).unwrap_or(false);
+        let right_open = self.right_panel_shown(hidden);
         if !hidden {
             egui::Panel::left("left_rail")
                 .exact_size(56.0)
@@ -1513,7 +1731,7 @@ impl FigApp {
         }
         // The panels are as wide as asked, less in a window too small for them and the canvas.
         let left_open = !hidden && !self.ui.left_collapsed;
-        let (left_w, right_w) = fit_panels(ui.available_width(), left_open.then_some(self.ui.left_width), self.ui.right_width);
+        let (left_w, right_w) = fit_panels(ui.available_width(), left_open.then_some(self.ui.left_width), right_open.then_some(self.ui.right_width));
         let rows = ui.available_rect_before_wrap().y_range();
         let mut edges: Vec<(&str, f32, f32, f32)> = Vec::new();
         if left_open {
@@ -1532,7 +1750,7 @@ impl FigApp {
                     layers::left_panel(self, ui)
                 });
         }
-        if !hidden {
+        if right_open {
             edges.push(("right", ui.available_rect_before_wrap().max.x - right_w, right_w, -1.0));
             egui::Panel::right("right_panel")
                 .resizable(false)
@@ -1663,7 +1881,7 @@ impl FigApp {
             "focus": {"region": self.ui.nav.region.id(), "keyboard": self.ui.nav.keyboard},
             "reduceMotion": self.reduce_motion(),
             "presenting": self.ui.present.is_some(),
-            "presenter": self.ui.present.as_ref().or(self.ui.paused_present.as_ref()).map(present::Presenter::inspect),
+            "presenter": tabs::shown_or_paused(self).map(present::Presenter::inspect),
             "presentOptions": {"scale": self.ui.present_view.scale.id(), "deviceFrame": self.ui.present_view.device_frame, "comments": self.ui.present_view.comments, "hotspotHints": self.ui.present_view.hotspot_hints, "inspect": self.ui.present_view.inspect},
             "preview": self.ui.preview.as_ref().map(|p| p.player.inspect()),
             "mainMenu": self.ui.main_menu,
@@ -1671,7 +1889,7 @@ impl FigApp {
             "variables": self.ui.variables.is_some(),
             "versionHistory": self.ui.versions.open,
             "branchReview": self.ui.branch_review.as_ref().map(|r| json!({"id": r.id, "picks": r.picks, "mode": if r.mode == dev_compare::Mode::Overlay { "overlay" } else { "sideBySide" }})),
-            "devCompare": self.ui.dev.compare.as_ref().map(|c| json!({"id": c.id, "mode": if c.mode == dev_compare::Mode::Overlay { "overlay" } else { "sideBySide" }, "split": c.split})),
+            "devCompare": self.ui.dev.compare.as_ref().map(|c| json!({"id": c.id, "mode": if c.mode == dev_compare::Mode::Overlay { "overlay" } else { "sideBySide" }, "split": c.split, "version": c.version})),
             "devFocus": self.session.ds().ok().and_then(figcraft_engine::DocState::focused),
             "annotationFilter": self.ui.dev.categories.id(),
             "colorProfileDialog": self.ui.color_profile.map(|p| p.id()),
@@ -1712,8 +1930,13 @@ impl FigApp {
             "lastError": self.ui.last_error,
             "importReport": self.ui.import_report.as_ref().map(import_report::Report::inspect),
         });
+        state["homeSearch"] = json!(self.ui.home_view.file_query);
+        // Set apart from the literal above, which is at the macro recursion limit.
+        state["uiScale"] = json!({"choice": self.session.prefs.ui_scale, "zoom": self.ui.ui_scale.zoom, "drawn": self.ui.ui_scale.drawn, "limited": self.ui.ui_scale.limited});
         state["pendingOpens"] = json!(self.ui.pending_opens.len());
         state["guests"] = guests::inspect(self);
+        state["missingFonts"] = json!(self.ui.missing_fonts.as_ref().map(missing_fonts::Shown::inspect));
+        state["presentTabs"] = tabs::present_tabs_inspect(self);
         state
     }
 }
@@ -1723,20 +1946,31 @@ pub(crate) const OPEN_EXTENSIONS: &[&str] = &["figcraft", "fig", "json", "svg", 
 
 /// Whether `path` names a file type that opens as a document (the extension, in any case).
 pub(crate) fn opens(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| OPEN_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+    path.extension().and_then(OsStr::to_str).is_some_and(|e| OPEN_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-/// The contents of a dropped file that has no file on disk to read by path.
+/// Whether `path` is a whole document (`.figcraft`, `.fig`, file JSON) rather than an image or SVG:
+/// dropped on the canvas it opens as a file of its own instead of adding its pages to the open one.
+pub(crate) fn is_document(path: &Path) -> bool {
+    path.extension().and_then(OsStr::to_str).is_some_and(|e| ["figcraft", "fig", "json"].iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// Reads the contents of dropped file `name` that has no file on disk to read by path.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
-    f.bytes().ok()
+pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle, name: &str) -> ReadFuture {
+    Box::pin(std::future::ready(f.bytes().map_err(|_| unreadable(name))))
 }
 
-/// The contents of a dropped file that has no file on disk to read by path.
+/// Reads the contents of dropped file `name`; the browser hands them over asynchronously.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn dropped_bytes(_f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
-    // Browser drops arrive asynchronously; not supported yet.
-    None
+pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle, name: &str) -> ReadFuture {
+    let (f, name) = (f.clone(), name.to_string());
+    Box::pin(async move {
+        if let Some(file) = f.web_file() {
+            browser_can_read(&name, file.size())?;
+        }
+        f.bytes_async().await.map_err(|_| unreadable(&name))
+    })
 }
 
 /// While files are dragged over the window: a tinted, outlined `rect` with `label` in its middle,
@@ -1749,11 +1983,11 @@ pub(crate) fn drop_overlay(ctx: &egui::Context, rect: egui::Rect, label: &str) {
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_overlay")));
     let area = rect.shrink(4.0);
     painter.rect_filled(area, egui::CornerRadius::same(8), t.accent.gamma_multiply(0.12));
-    painter.rect_stroke(area, egui::CornerRadius::same(8), egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+    painter.rect_stroke(area, egui::CornerRadius::same(8), egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
     let galley = painter.layout_no_wrap(label.to_owned(), theme::semibold(14.0), t.text);
     let pill = egui::Rect::from_center_size(area.center(), galley.size() + egui::vec2(32.0, 16.0));
     painter.rect_filled(pill, egui::CornerRadius::same(8), t.panel);
-    painter.rect_stroke(pill, egui::CornerRadius::same(8), egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+    painter.rect_stroke(pill, egui::CornerRadius::same(8), egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
     painter.galley(pill.center() - galley.size() / 2.0, galley, t.text);
     // Hovering sends no pointer events on every platform: keep the overlay current.
     ctx.request_repaint();
@@ -1764,6 +1998,9 @@ mod selection_spacing_tests;
 
 #[cfg(test)]
 mod typography_missing_font_tests;
+
+#[cfg(test)]
+mod type_settings_tests;
 
 #[cfg(test)]
 mod typography_scrub_tests;
