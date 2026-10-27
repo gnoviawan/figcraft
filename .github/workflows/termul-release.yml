@@ -30,9 +30,9 @@ env:
   WASM_BINDGEN_VERSION: "0.2.129"
   BINARYEN_VERSION: "123"
   FIGCRAFT_BRAND_NAME: "Termul Canvas"
-  # Same pin as release.yml. It must be a commit with fonts/latin-manifest.txt (Inter), which main
-  # does not have yet; the wasm build embeds nothing without Inter and text then has no width.
-  CRAFT_FONTS_REF: "43913056ce82a3fdad0ef69f6b88d1dc922a8104"
+  # Same pin as release.yml and ci.yml. It must be a commit with fonts/latin-manifest.txt (Inter):
+  # the wasm build embeds nothing without Inter and text then has no width.
+  CRAFT_FONTS_REF: "37827adc41fd165f9a9234ac40f94dbad353aa69"
   CRAFT_FONTS_REQUIRED: "1"
 
 jobs:
@@ -107,9 +107,15 @@ jobs:
           wasm-bindgen --version
           wasm-opt --version
 
-      - name: Build the web bundle, enforce the 24 MiB wasm gate and zip
+      - name: Build the web bundle, enforce the 24.5 MiB wasm gate and zip
         env:
           DIST: ${{ runner.temp }}/release
+          # package.sh keeps a .wasm under 24 MiB for Cloudflare's 25 MiB per-file cap. This bundle
+          # never goes to Cloudflare: Termul downloads it from this repository's GitHub release,
+          # embeds it in its own binary and serves it from its own server (termul
+          # src-tauri/build.rs, src-tauri/src/canvas/static_server.rs). 24.5 MiB keeps the gate as a
+          # check on growth, below that cap.
+          FIGCRAFT_WASM_MAX_BYTES: "25690112"
         run: |
           set -euo pipefail
           export FIGCRAFT_VERSION="$TAG" FIGCRAFT_HOST_TAG="$TAG"

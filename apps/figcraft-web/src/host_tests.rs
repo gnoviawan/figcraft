@@ -555,7 +555,7 @@ fn fallback_fonts_take_a_bounded_list_of_urls() {
     }
 }
 
-/// A font file with dingbats the embedded Inter lacks, when this machine has one.
+/// A font file with symbols the embedded fonts lack, when this machine has one.
 fn symbol_font() -> Option<Vec<u8>> {
     ["C:/Windows/Fonts/seguisym.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Apple Symbols.ttf"]
         .iter()
@@ -565,6 +565,16 @@ fn symbol_font() -> Option<Vec<u8>> {
 #[test]
 fn fallback_fonts_draw_what_the_text_font_lacks() {
     let Some(font) = symbol_font() else { return };
+    // Symbols the font draws and no embedded font does (the embedded set grows with craft-fonts).
+    let mut db = figcraft_text::FontDb::default();
+    let symbols = db.add_bytes(font.clone());
+    let embedded: Vec<_> = figcraft_text::CRAFT_FONTS.iter().flat_map(|f| db.add_bytes(f.bytes.to_vec())).collect();
+    let candidates: Vec<String> = (0x2190..=0x2BFF)
+        .chain(0x1F300..=0x1F6FF)
+        .filter_map(char::from_u32)
+        .filter(|c| symbols.iter().any(|f| f.has_char(*c)) && !embedded.iter().any(|f| f.has_char(*c)))
+        .map(String::from)
+        .collect();
     let (mut app, ctx, mut host) = app();
     let mut render = |text: &str| {
         let made = ok(
@@ -579,7 +589,11 @@ fn fallback_fonts_draw_what_the_text_font_lacks() {
     };
     // U+0378 is unassigned, so no font draws it: its render is the NOGLYPH box.
     let noglyph = render("\u{378}");
-    assert_eq!(render("\u{276F}"), noglyph, "❯ is a NOGLYPH box before");
+    // One that draws as that box before (some decompose into characters an embedded font has).
+    let Some(symbol) = candidates.into_iter().take(200).find(|s| render(s) == noglyph) else {
+        eprintln!("skipping: every symbol in the font draws without it");
+        return;
+    };
     let reply: Value = serde_json::from_str(&crate::host::add_fallback_fonts(vec![
         ("host-fonts/symbols".into(), Ok(font)),
         ("host-fonts/missing.ttf".into(), Err("HTTP 404".into())),
@@ -589,5 +603,5 @@ fn fallback_fonts_draw_what_the_text_font_lacks() {
     assert_eq!(reply["families"].as_array().map(Vec::len), Some(1), "{reply}");
     assert_eq!(reply["failed"][0], json!({"url": "host-fonts/missing.ttf", "error": "HTTP 404"}));
     assert_eq!(reply["failed"][1], json!({"url": "host-fonts/junk.ttf", "error": "not a font file"}));
-    assert_ne!(render("\u{276F}"), noglyph, "❯ comes from the fallback font");
+    assert_ne!(render(&symbol), noglyph, "{symbol} comes from the fallback font");
 }

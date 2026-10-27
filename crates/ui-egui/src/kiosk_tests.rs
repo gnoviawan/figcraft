@@ -292,7 +292,7 @@ fn outside_kiosk_the_help_menu_lists_every_row_unless_the_build_is_rebranded() {
 #[test]
 fn help_rows_follow_the_shell_and_the_brand() {
     let commands = |shell, rebranded| crate::toolbar::help_rows(shell, rebranded).map(|(_, c)| c).collect::<Vec<_>>();
-    let all = vec!["help.gettingStarted", "help.shortcuts", "help.page", "help.about"];
+    let all = vec!["help.gettingStarted", "help.shortcuts", "help.page", "help.checkForUpdates", "help.about"];
     let kept = vec!["help.shortcuts", "help.about"];
     assert_eq!(commands(Shell::Full, false), all);
     assert_eq!(commands(Shell::Kiosk, false), kept);

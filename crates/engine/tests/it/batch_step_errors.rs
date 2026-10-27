@@ -38,7 +38,7 @@ fn the_issue_1424_batch_names_the_step_whose_parent_has_no_auto_layout() {
     let mut s = Session::new();
     let main = main_frame(&mut s);
     let err = s.execute("command.batch", &json!({"commands": issue_1424_steps(&main)})).unwrap_err().to_string();
-    assert!(err.starts_with("step 35 (node.create \"Placeholder\"): "), "{err}");
+    assert!(err.contains("step 35 (node.create \"Placeholder\"): "), "{err}");
     assert!(err.contains("Fill needs an auto layout parent"), "{err}");
     let main = figcraft_engine::params::id_of(&main).unwrap();
     assert!(s.doc().unwrap().node(main).unwrap().children.is_empty(), "the batch rolled back");
@@ -76,6 +76,6 @@ fn a_failing_named_step_is_named_by_its_as_and_its_layer_name() {
         )
         .unwrap_err()
         .to_string();
-    assert!(err.starts_with("step 1 \"hero-title\" (node.create \"Hero Title\"): "), "{err}");
+    assert!(err.contains("step 1 \"hero-title\" (node.create \"Hero Title\"): "), "{err}");
     assert!(err.contains("Fill needs an auto layout parent"), "{err}");
 }

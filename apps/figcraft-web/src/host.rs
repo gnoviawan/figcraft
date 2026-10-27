@@ -209,8 +209,7 @@ impl Host {
             }
             Route::Frame => {
                 let (reply, rx) = std::sync::mpsc::channel();
-                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                app.control_queue.push(ControlRequest { id: Value::Null, method: method.to_string(), params: p, reply, cancelled });
+                app.control_queue.push(ControlRequest { id: Value::Null, method: method.to_string(), params: p, reply, state: Default::default() });
                 ctx.request_repaint();
                 return Answer::Later(rx);
             }
