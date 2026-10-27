@@ -157,7 +157,7 @@ nothing (`--out` is not saved, and the session's documents go back to how the sc
 and exits with code 1:
 
 ```text
-{"step":1,"command":"node.set","ok":false,"error":"no such node 99999","rolledBack":true}
+{"command":"node.set","error":"step 1 (node.set): no such node 99999","ok":false,"rolledBack":true,"step":1}
 ```
 
 `--out` saves the result by extension like `convert`.

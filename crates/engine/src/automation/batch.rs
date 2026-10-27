@@ -97,9 +97,8 @@ impl BatchScope {
     }
 
     fn resolve_in(&self, v: &Value, depth: usize) -> Result<Value> {
-        let step = self.next_step();
         if depth > MAX_DEPTH {
-            return Err(bad("command.batch", format!("step {step}: params nest deeper than {MAX_DEPTH} levels")));
+            return Err(bad("command.batch", format!("params nest deeper than {MAX_DEPTH} levels")));
         }
         match v {
             Value::Object(o) if REFERENCE_KEYS.iter().any(|k| o.contains_key(*k)) => self.reference(o),
@@ -118,7 +117,7 @@ impl BatchScope {
     /// The value a `{"$step": n}` or `{"$ref": "name"}` object (with an optional `field`) stands for.
     fn reference(&self, o: &Map<String, Value>) -> Result<Value> {
         let step = self.next_step();
-        let fail = |msg: String| bad("command.batch", format!("step {step}: {msg}"));
+        let fail = |msg: String| bad("command.batch", msg);
         let key = REFERENCE_KEYS.into_iter().find(|k| o.contains_key(*k)).unwrap_or("$ref");
         if let Some(k) = o.keys().find(|k| *k != key && *k != "field") {
             return Err(fail(format!("a `{key}` reference takes only `field`, not `{k}`")));

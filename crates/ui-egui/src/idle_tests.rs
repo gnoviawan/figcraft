@@ -429,6 +429,26 @@ fn auto_save_writes_a_changed_file_then_rests() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A kiosk's host saves its file, so auto-save leaves a changed file alone even when it is on.
+#[test]
+fn a_kiosk_does_not_auto_save() {
+    let dir = std::env::temp_dir().join(format!("figcraft-kiosk-auto-save-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("kiosk.figcraft").to_string_lossy().to_string();
+    let (mut h, _) = document();
+    h.run("file.save", json!({"path": path}));
+    h.run("pref.autoSave", json!({"on": true}));
+    h.app.shell = crate::Shell::Kiosk;
+    h.run("shape.rectangle", json!({"x": 500, "y": 300, "width": 40, "height": 40}));
+    for _ in 0..3 {
+        h.time += crate::AUTO_SAVE_SECS + 1.0;
+        h.frame(vec![]);
+    }
+    assert!(h.app.ui.auto_saving.is_empty() && h.app.ui.auto_save_at.is_none(), "nothing is being saved or waits to be");
+    assert!(h.app.session.ds().unwrap().is_dirty(), "the change is still unsaved");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Asserts a hidden logic tick runs background work and advances the autosave deadline
 /// without counting a UI frame, and is idempotent at the same time.
 #[test]

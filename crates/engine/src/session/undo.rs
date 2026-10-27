@@ -181,9 +181,10 @@ impl Session {
     /// of these as one undo step; a caller with its own list — the CLI's script runner — uses this
     /// so its steps resolve references the same way, inside its own [`Session::grouped`].
     pub fn batch_step(&mut self, scope: &mut BatchScope, cmd: &str, params: &Value) -> Result<()> {
-        let p = if cmd == "command.batch" { params.clone() } else { scope.resolve(params)? };
-        // Say which step failed; a nested batch names its own steps.
-        let v = self.execute(cmd, &p).map_err(|e| if cmd == "command.batch" { e } else { e.at_step(&scope.label(cmd, params)) })?;
+        // Say which step failed; a nested batch's error goes on to name its own failed step.
+        let at_step = |e: EngineError| e.at_step(&scope.label(cmd, params));
+        let p = if cmd == "command.batch" { params.clone() } else { scope.resolve(params).map_err(at_step)? };
+        let v = self.execute(cmd, &p).map_err(at_step)?;
         scope.push(v);
         Ok(())
     }

@@ -418,8 +418,8 @@ pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliRe
             line["as"] = json!(name);
         }
         println!("{line}");
-        let named = name.map(|name| format!(" {name:?}")).unwrap_or_default();
-        eprintln!("error: step {i}{named} ({cmd}) failed: {e}");
+        // The error starts with the step's label.
+        eprintln!("error: {e}");
         eprintln!("the script's document changes were rolled back");
         return Ok(ExitCode::from(1));
     }
