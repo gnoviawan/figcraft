@@ -189,9 +189,9 @@ fn bad_names_and_paths_fail_and_roll_back() {
     let later = json!({"command": "node.create", "as": "later", "params": {"type": "frame", "width": 10, "height": 10}});
     for (commands, needle) in [
         (json!([frame("card"), frame("card")]), "step 1: `as` \"card\" is already step 0's name"),
-        (json!([frame("card"), set(json!({"$ref": "nope"}))]), "step 1: `$ref` \"nope\" names no step (\"card\" is step 0)"),
+        (json!([frame("card"), set(json!({"$ref": "nope"}))]), "step 1 (node.set): `$ref` \"nope\" names no step (\"card\" is step 0)"),
         (json!([{"command": "node.create", "params": {"type": "frame"}}, set(json!({"$ref": "nope"}))]), "no step has an `as` name"),
-        (json!([frame("card"), set(json!({"$ref": "later"})), later]), "step 1: `$ref` \"later\" is step 2, not an earlier step"),
+        (json!([frame("card"), set(json!({"$ref": "later"})), later]), "step 1 (node.set): `$ref` \"later\" is step 2, not an earlier step"),
         (
             json!([frame("card"), {"command": "node.set", "as": "self", "params": {"ids": [{"$ref": "self"}], "props": {}}}]),
             "is step 1, not an earlier step",
@@ -203,7 +203,7 @@ fn bad_names_and_paths_fail_and_roll_back() {
         (json!([frame("card"), {"command": "node.create", "as": 3, "params": {}}]), "step 1: `as` must be a name"),
         (
             json!([frame("card"), dup.clone(), set(json!({"$ref": "copy", "field": "ids/1"}))]),
-            "step 2: step 1 (\"copy\")'s result has no `ids/1`: `ids` has 1 item",
+            "step 2 (node.set): step 1 (\"copy\")'s result has no `ids/1`: `ids` has 1 item",
         ),
         (json!([frame("card"), dup.clone(), set(json!({"$ref": "copy", "field": "ids/first"}))]), "`ids` is a list, so `first` must be an index"),
         (json!([frame("card"), dup.clone(), set(json!({"$ref": "copy", "field": "ids/0/x"}))]), "has no `ids/0/x`: `ids/0` is a number"),
@@ -309,7 +309,7 @@ fn a_bad_name_reference_says_name() {
     let frame = json!({"command": "node.create", "as": "card", "params": {"type": "frame", "width": 10, "height": 10}});
     let set = |r: serde_json::Value| json!({"command": "node.set", "params": {"ids": [r], "props": {"name": "x"}}});
     for (commands, needle) in [
-        (json!([frame.clone(), set(json!({"$name": "nope"}))]), "step 1: `$name` \"nope\" names no step (\"card\" is step 0)"),
+        (json!([frame.clone(), set(json!({"$name": "nope"}))]), "step 1 (node.set): `$name` \"nope\" names no step (\"card\" is step 0)"),
         (json!([frame.clone(), set(json!({"$name": 0}))]), "`$name` must be a step name"),
         (json!([frame.clone(), set(json!({"$ref": "card", "$name": "card"}))]), "a `$ref` reference takes only `field`, not `$name`"),
     ] {
