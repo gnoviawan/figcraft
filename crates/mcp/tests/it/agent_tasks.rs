@@ -400,7 +400,7 @@ fn task_section_with_named_steps() {
             {"command": "node.create", "as": "cta", "params": {"type": "frame", "parent": {"$name": "card"}}},
         ]}),
     );
-    assert!(e.contains("step 1: `$name` \"cta\" is step 2, not an earlier step"), "{e}");
+    assert!(e.contains("step 1 \"label\" (node.create): `$name` \"cta\" is step 2, not an earlier step"), "{e}");
     assert!(c.page_children().is_empty(), "the failed batch rolled back");
 }
 

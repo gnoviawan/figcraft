@@ -405,3 +405,22 @@ fn an_unconfined_write_follows_a_symbolic_link() {
     assert!(written.starts_with(b"\x89PNG"), "the target holds the render, not the placeholder");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// A failed step's label is in its error once, on stdout and on stderr alike.
+#[test]
+fn run_names_a_failed_step_once() {
+    let d = tmp("failed-step");
+    let script = d.join("s.json");
+    std::fs::write(
+        &script,
+        r#"[{"command":"node.create","params":{"type":"frame"}},{"command":"node.set","params":{"ids":[99999],"props":{"name":"x"}}}]"#,
+    )
+    .unwrap();
+    let out = bin().arg("run").arg(&script).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let line: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(line["error"], "step 1 (node.set): no such node 99999");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().next(), Some("error: step 1 (node.set): no such node 99999"), "{stderr}");
+    std::fs::remove_dir_all(&d).ok();
+}
