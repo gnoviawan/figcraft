@@ -15,7 +15,7 @@
 //!   for the frames that follow (all false: released); `gamepad` presses a controller button in the
 //!   prototype playing (presenter or preview pane)
 //! - `ui.menu.invoke {id}` — a menu item exactly like clicking it (may open a dialog)
-//! - `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, focusRegion?, preview?, presentScroll?, …}`
+//! - `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeSearch?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, focusRegion?, preview?, presentScroll?, …}`
 //! - `ui.screenshot {path?}` — PNG of the window (needs a visible window), written to `path` or
 //!   returned as base64 `data`
 //! - `ui.render {path?, scale?, ids?}` — PNG of the document (no UI chrome; works without a
@@ -244,6 +244,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 app.session.execute(cmd, &params)
             }
             .map_err(|e| e.to_string());
+            app.clear_comment_draft_after_tool_set(cmd, r.is_ok());
             // Programmatic calls never open dialogs.
             app.session.ui_requests.retain(|u| !u.kind.starts_with("dialog."));
             app.handle_ui_requests();
@@ -256,7 +257,7 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 .collect(),
         )),
         "document.inspect" => {
-            let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(8) as usize;
+            let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(8).min(64) as usize;
             Ok(figcraft_engine::inspect::document(&app.session, depth, b(p, "allPages")))
         }
         "node.get" => {
@@ -340,7 +341,8 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
                 .ok_or("`events` required: [{move|down|up: [x, y]} | {key, shift?, alt?, cmd?} | {text} | {leave: true}]")?;
             let pos = |v: &Value| -> Option<egui::Pos2> {
                 let a = v.as_array()?;
-                Some(egui::pos2(a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
+                let p = egui::pos2(a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32);
+                p.is_finite().then_some(p)
             };
             let mut events = Vec::new();
             let mut pads = Vec::new();
@@ -433,6 +435,9 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             }
             if let Some(section) = p.get("homeSection").and_then(Value::as_str).and_then(crate::home::Section::parse) {
                 app.ui.home_view.section = section;
+            }
+            if let Some(query) = p.get("homeSearch").and_then(Value::as_str) {
+                app.ui.home_view.file_query = query.chars().take(256).collect();
             }
             if let Some(view) = p.get("homeRecentsView").and_then(Value::as_str).and_then(crate::home_recents::View::parse) {
                 view.store(&mut app.session.prefs);
@@ -634,12 +639,16 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             if let Some(v) = p.get("exportPreview").and_then(Value::as_bool) {
                 app.ui.export_thumb = v;
             }
-            // Dev Mode's compare view: a ready-for-dev frame or section opens it, null closes it;
+            // Dev Mode's compare view: a frame or section opens it, null closes it; `devCompareVersion`
+            // the saved version it compares with (null: when it was marked ready for dev),
             // `devCompareMode` is sideBySide or overlay, `devCompareSplit` the overlay slider (0–1).
             if let Some(v) = p.get("devCompare") {
-                app.ui.dev.compare = figcraft_engine::params::id_of(v).map(crate::dev_compare::CompareView::new);
+                app.ui.dev.compare = figcraft_engine::params::id_of(v).map(|id| crate::dev_compare::CompareView::new(id, None));
             }
             if let Some(c) = app.ui.dev.compare.as_mut() {
+                if let Some(v) = p.get("devCompareVersion") {
+                    c.version = v.as_str().map(str::to_string);
+                }
                 match p.get("devCompareMode").and_then(Value::as_str) {
                     Some("overlay") => c.mode = crate::dev_compare::Mode::Overlay,
                     Some("sideBySide") => c.mode = crate::dev_compare::Mode::SideBySide,

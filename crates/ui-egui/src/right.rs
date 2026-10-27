@@ -11,7 +11,7 @@ use crate::i18n::{tr, trf, trn};
 use crate::icons::{self, Icon};
 use crate::list_drag::{ListDrag, move_flags, remove_flags};
 use crate::style_picker::{self, StyleSlot};
-use crate::theme::{ACCENT, Tokens, regular, semibold};
+use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{self, Edit, FIELD_H, FieldEdit, Lead, PAD};
 use crate::{FigApp, RightTab};
 
@@ -88,12 +88,12 @@ pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let mut play_right = top.max.x - 8.0;
     if collaboration {
         // As wide as its label needs (longer in some languages).
-        let label = ui.painter().layout_no_wrap(tr("Share").to_string(), semibold(11.5), Color32::WHITE);
+        let label = ui.painter().layout_no_wrap(tr("Share").to_string(), semibold(11.5), t.accent_on);
         let sw = (label.size().x + 24.0).max(56.0);
         let share = Rect::from_min_size(pos2(top.max.x - 14.0 - sw, top.center().y - 16.0), vec2(sw, 32.0));
         let sresp = ui.interact(share, ui.id().with("share"), Sense::click()).tip(tr("Share: live session, export"));
-        ui.painter().rect_filled(share, CornerRadius::same(6), if sresp.hovered() { t.accent_hover } else { ACCENT });
-        ui.painter().galley(share.center() - label.size() / 2.0, label, Color32::WHITE);
+        ui.painter().rect_filled(share, CornerRadius::same(6), if sresp.hovered() { t.accent_hover } else { t.accent });
+        ui.painter().galley(share.center() - label.size() / 2.0, label, t.accent_on);
         crate::live::share_popover(app, &sresp);
         play_right = share.min.x - 8.0;
     }
@@ -143,6 +143,9 @@ pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
         }
         ui.painter().galley(pos2(r.min.x + 8.0, r.center().y - galley.size().y / 2.0), galley, if active { t.text } else { t.text_secondary });
         if resp.clicked() {
+            if app.ui.right_tab != tab {
+                crate::proto_panel::open_editor(ui.ctx(), None);
+            }
             app.ui.right_tab = tab;
         }
         x = r.max.x + 2.0;
@@ -289,13 +292,15 @@ pub fn menu_row(ui: &mut Ui, label: &str, shortcut: &str, art_w: f32, art: impl 
     a11y::own_focus(&resp);
     let hovered = resp.hovered() || resp.has_focus();
     if hovered {
-        ui.painter().rect_filled(r, CornerRadius::same(5), ACCENT);
+        ui.painter().rect_filled(r, CornerRadius::same(5), t.menu_hover);
     }
-    let col = if hovered { Color32::WHITE } else { t.text };
+    // These menus sit on the theme's popup fill (white in the light theme), not on the dark
+    // `t.menu` of the menu bar: the theme's text, white only on the green highlight (#972).
+    let col = if hovered { t.menu_text } else { t.text };
     ui.painter().galley(pos2(r.min.x + MENU_PAD, r.center().y - text.size().y / 2.0), text, col);
     if let Some(k) = keys {
         let at = pos2(r.max.x - MENU_PAD - k.size().x, r.center().y - k.size().y / 2.0);
-        ui.painter().galley(at, k, if hovered { Color32::WHITE } else { t.text_secondary });
+        ui.painter().galley(at, k, if hovered { t.menu_text } else { t.text_secondary });
     }
     art(ui.painter(), r, col);
     resp
@@ -665,7 +670,7 @@ fn position_fields(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]
     });
     widgets::sublabels(ui, tr("Rotation"), None);
     row(ui, 32.0, |ui| {
-        let e = widgets::number_field_mixed(ui, Id::new("pos_rot"), Lead::Icon(Icon::CornerRadius, tr("Rotation")), rot, "°", col, 1.0);
+        let e = widgets::number_field_mixed(ui, Id::new("pos_rot"), Lead::Icon(Icon::Angle, tr("Rotation")), rot, "°", col, 1.0);
         app.field_of(&ids, "rotation", e, rot_of, |v| json!(v));
         let items = [
             (Icon::Rotate, tr("Rotate 90° right")),
@@ -855,6 +860,8 @@ fn appearance(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     let radius_ok = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.has_corner_radius()));
     // Only rectangles and frames round each corner on its own.
     let indep_ok = radius_ok && sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.has_independent_corners()));
+    // For polygons and stars the same panel holds only the Corner smoothing row.
+    let smooth_ok = radius_ok && sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.has_corner_smoothing()));
     let r = common(doc, sel, |n| n.corners.uniform().map(|r| (r * 100.0).round() / 100.0));
     widgets::sublabels(ui, tr("Opacity"), radius_ok.then_some(tr("Corner radius")));
     row(ui, 32.0, |ui| {
@@ -877,57 +884,50 @@ fn appearance(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
             let radius_of = |n: &Node| n.corners.uniform().unwrap_or_else(|| n.corners.radii.iter().copied().fold(0.0, f64::max));
             app.field_of(&ids, "cornerRadius", e, radius_of, |v| json!(v.max(0.0)));
             let open = ui.data(|d| d.get_temp::<bool>(Id::new("indep_corners"))).unwrap_or(false);
-            if indep_ok && icons::button(ui, Icon::IndependentCorners, 24.0, open, tr("Individual corners")).clicked() {
+            // Polygons and stars have no corners of their own: the button opens only Corner smoothing.
+            let tip = if indep_ok { tr("Individual corners") } else { tr("Corner smoothing") };
+            if smooth_ok && icons::button(ui, Icon::IndependentCorners, 24.0, open, tip).clicked() {
                 ui.data_mut(|d| d.insert_temp(Id::new("indep_corners"), !open));
             }
         }
     });
-    if indep_ok && ui.data(|d| d.get_temp::<bool>(Id::new("indep_corners"))).unwrap_or(false) {
+    if smooth_ok && ui.data(|d| d.get_temp::<bool>(Id::new("indep_corners"))).unwrap_or(false) {
         let radii = common(doc, sel, |n| n.corners.radii);
-        let keys = [
-            ("topLeftRadius", tr("Top left radius")),
-            ("topRightRadius", tr("Top right radius")),
-            ("bottomRightRadius", tr("Bottom right radius")),
-            ("bottomLeftRadius", tr("Bottom left radius")),
+        // `k` indexes `radii` ([top left, top right, bottom right, bottom left]); the fields sit
+        // where their corners are: top left, top right / bottom left, bottom right.
+        let corners = [
+            ("topLeftRadius", tr("Top left radius"), Icon::CornerTopLeft, 0),
+            ("topRightRadius", tr("Top right radius"), Icon::CornerTopRight, 1),
+            ("bottomLeftRadius", tr("Bottom left radius"), Icon::CornerBottomLeft, 3),
+            ("bottomRightRadius", tr("Bottom right radius"), Icon::CornerBottomRight, 2),
         ];
-        row(ui, 32.0, |ui| {
-            for (k, (key, name)) in keys.iter().enumerate().take(2) {
-                let e = crate::variable_ui::number_field(
-                    app,
-                    ui,
-                    &ids,
-                    key,
-                    Id::new(("corner", k)),
-                    Lead::Icon(Icon::CornerRadius, name),
-                    radii.map(|r| r[k]),
-                    "",
-                    col,
-                );
-                app.field(&ids, key, e, |v| json!(v.max(0.0)));
-            }
-        });
-        row(ui, 32.0, |ui| {
-            for (k, (key, name)) in keys.iter().enumerate().skip(2) {
-                let e = crate::variable_ui::number_field(
-                    app,
-                    ui,
-                    &ids,
-                    key,
-                    Id::new(("corner", k)),
-                    Lead::Icon(Icon::CornerRadius, name),
-                    radii.map(|r| r[k]),
-                    "",
-                    col,
-                );
-                app.field(&ids, key, e, |v| json!(v.max(0.0)));
-            }
-        });
+        // Polygons and stars have one radius, so no field per corner.
+        for pair in corners.chunks(2).filter(|_| indep_ok) {
+            row(ui, 32.0, |ui| {
+                for (key, name, icon, k) in pair {
+                    let e = crate::variable_ui::number_field(
+                        app,
+                        ui,
+                        &ids,
+                        key,
+                        Id::new(("corner", *k)),
+                        Lead::Icon(*icon, name),
+                        radii.map(|r| r[*k]),
+                        "",
+                        col,
+                    );
+                    app.field(&ids, key, e, |v| json!(v.max(0.0)));
+                }
+            });
+        }
         let sm = common(doc, sel, |n| (n.corners.smoothing * 100.0).round());
         widgets::sublabels(ui, tr("Corner smoothing"), None);
         row(ui, 32.0, |ui| {
             let e = widgets::number_field(ui, Id::new("smoothing"), Lead::None, sm, "%", col, 1.0);
             app.field(&ids, "cornerSmoothing", e, |v| json!((v / 100.0).clamp(0.0, 1.0)));
-            widgets::label(ui, "iOS: 60%", Tokens::get(ui.ctx()).text_tertiary);
+            if widgets::button(ui, tr("iOS"), false, true).on_hover_text(tr("Set corner smoothing to 60%")).clicked() {
+                app.set_props(&ids, json!({"cornerSmoothing": 0.6}));
+            }
         });
     }
     let blend = common(doc, sel, |n| n.blend);
@@ -966,8 +966,8 @@ fn variable_modes(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId])
     // The collection's name, then a wider mode picker ("Auto (Light)") across both field columns.
     let col = widgets::col_width(ui.available_width());
     let (name_w, pick_w) = ((col * 0.7).round(), (col * 1.3).round());
-    // Auto resolves from the parent of the first selected layer.
-    let parent_modes = sel.first().and_then(|i| doc.node(*i)).and_then(|n| n.parent).map(|p| doc.modes_for(p)).unwrap_or_default();
+    // Auto resolves as for the first selected layer: from its parent, or an instance's main.
+    let parent_modes = sel.first().map(|i| doc.inherited_modes(*i)).unwrap_or_default();
     let mut group = None;
     for r in &rows {
         let c = r.coll;
@@ -1895,7 +1895,7 @@ fn effect_settings(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &
             row(ui, 32.0, |ui| {
                 let ed = widgets::number_field(ui, Id::new(("fx_gl", i)), Lead::Text(tr("Light|glass")), Some(g.light_angle.round()), "°", half, 1.0);
                 edit(app, ed, &|v| with(&|gl| gl.light_angle = v.clamp(-180.0, 180.0)));
-                let ed = widgets::number_field(ui, Id::new(("fx_gi", i)), Lead::None, pct(g.light_intensity), "%", half, 1.0);
+                let ed = widgets::number_field(ui, Id::new(("fx_gi", i)), Lead::Text(tr("Intensity")), pct(g.light_intensity), "%", half, 1.0);
                 edit(app, ed, &|v| with(&|gl| gl.light_intensity = unit(v)));
             });
             row(ui, 32.0, |ui| {
@@ -2061,8 +2061,13 @@ fn grid_settings(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], list: &[LayoutGr
             // 0 is Auto for fixed-size columns (rows); a stretched grid has at least one.
             let count = (!auto_count(g)).then(|| f64::from(g.count.max(1)));
             let key = format!("layoutGrids/{i}/count");
-            let e =
-                crate::variable_ui::number_field_or(app, ui, ids, &key, Id::new(("grid_field", "count", i)), count, col, tr("Auto"), Lead::None, "");
+            let id = Id::new(("grid_field", "count", i));
+            // A stretched grid has at least one band, so 0 (Auto) isn't a count it can take.
+            let e = if g.align == GridAlign::Stretch {
+                crate::variable_ui::number_field_or(app, ui, ids, &key, id, count, col, "", Lead::None, "")
+            } else {
+                crate::variable_ui::number_field_auto(app, ui, ids, &key, id, count, col, Lead::None, "")
+            };
             app.field_run(e, "node.set", |v| {
                 set(&|x| x.count = if x.align == GridAlign::Stretch { v.round().clamp(1.0, 1000.0) } else { v.round().clamp(0.0, 1000.0) } as u32)
             });
@@ -2095,11 +2100,17 @@ fn grid_settings(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], list: &[LayoutGr
         let span = if cols { tr("Width") } else { tr("Height") };
         match g.align {
             GridAlign::Stretch => {
-                widgets::sublabels(ui, tr("Margin"), Some(tr("Gutter")));
+                widgets::sublabels(ui, span, Some(tr("Margin")));
                 row(ui, 32.0, |ui| {
+                    // The frame, divided by the count: shown as Auto and not editable.
+                    ui.add_enabled_ui(false, |ui| {
+                        let auto = widgets::Empty::Text(tr("Auto"));
+                        widgets::number_field_bindable(ui, Id::new(("grid_field", "size", i)), Lead::Named(span), None, "", col, 1.0, None, auto)
+                    });
                     field(app, ui, "offset", g.offset, &offset);
-                    field(app, ui, "gutter", g.gutter, &gutter);
                 });
+                widgets::sublabels(ui, tr("Gutter"), None);
+                row(ui, 32.0, |ui| field(app, ui, "gutter", g.gutter, &gutter));
             }
             GridAlign::Center => {
                 widgets::sublabels(ui, span, Some(tr("Gutter")));
@@ -2247,6 +2258,7 @@ fn inspect(app: &mut FigApp, ui: &mut Ui) {
         widgets::note(ui, tr("Hover other layers to measure the distance"), t.text_secondary);
         crate::dev_mode::ready_list(app, ui);
         crate::dev_mode::categories_section(app, ui);
+        crate::dev_mode::measurements_section(app, ui, &doc, &sel);
         crate::dev_mode::plugins_section(app, ui);
         return;
     };
@@ -2255,6 +2267,7 @@ fn inspect(app: &mut FigApp, ui: &mut Ui) {
     crate::dev_mode::status(app, ui, &doc, &sel);
     crate::dev_mode::annotations_section(app, ui, &doc, first);
     crate::dev_mode::dev_resources_section(app, ui, &doc, first);
+    crate::dev_mode::measurements_section(app, ui, &doc, &sel);
     use figcraft_engine::devinspect::ColorFormat;
     let fmt_id = Id::new("inspect_color_format");
     let fmt = ui.data(|d| d.get_temp::<usize>(fmt_id)).and_then(|i| ColorFormat::ALL.get(i).copied()).unwrap_or_default();

@@ -58,6 +58,24 @@ fn a_confined_app_writes_only_inside_its_write_root() {
 }
 
 #[test]
+fn a_confined_app_saves_only_inside_its_write_root() {
+    // #836: saving over the control channel, both as a new file and to the current one.
+    let (mut app, d) = confined_app("save");
+    let p = |rel: &str| d.0.join(rel).to_string_lossy().into_owned();
+    for cmd in ["file.saveAs", "file.save"] {
+        let e = handle(&mut app, "engine.execute", json!({"command": cmd, "params": {"path": p("outside/a.figcraft")}})).unwrap_err();
+        assert!(e.contains("automation path rejected"), "{cmd}: {e}");
+        let e = handle(&mut app, "engine.execute", json!({"command": cmd, "params": {"path": p("out/../outside/b.figcraft")}})).unwrap_err();
+        assert!(e.contains("automation path rejected"), "{cmd}: {e}");
+    }
+    assert_eq!(std::fs::read_dir(d.0.join("outside")).unwrap().count(), 0, "nothing written outside the root");
+    handle(&mut app, "engine.execute", json!({"command": "file.saveAs", "params": {"path": p("out/in.figcraft")}})).unwrap();
+    assert!(d.0.join("out/in.figcraft").is_file());
+    // Saving again goes to the same file, inside the root.
+    handle(&mut app, "engine.execute", json!({"command": "file.save", "params": {}})).unwrap();
+}
+
+#[test]
 fn window_captures_are_written_through_the_roots_or_returned() {
     let (app, d) = confined_app("capture");
     let img = egui::ColorImage::filled([3, 2], egui::Color32::RED);
@@ -71,4 +89,34 @@ fn window_captures_are_written_through_the_roots_or_returned() {
         assert_eq!((data["format"].as_str(), data["height"].as_u64()), (Some("png"), Some(2)));
     });
     assert!(d.0.join("out/shot.png").is_file() && !d.0.join("outside/shot.png").exists());
+}
+
+#[test]
+fn ui_input_rejects_non_finite_coordinates() {
+    let (mut app, _d) = confined_app("input");
+    for ev in [json!({"move": [1e300, 5]}), json!({"down": [5, 1e300]}), json!({"scroll": [1e300, 0]})] {
+        let r = handle(&mut app, "ui.input", json!({"events": [ev]}));
+        assert!(r.is_err(), "{ev}: {r:?}");
+    }
+    assert!(app.control_input.iter().all(|e| !matches!(e, egui::Event::PointerMoved(p) if !p.is_finite())));
+}
+
+#[test]
+fn document_inspect_caps_the_requested_depth() {
+    let (mut app, _d) = confined_app("inspect-depth");
+    let mut parent: Option<Value> = None;
+    for _ in 0..80 {
+        let mut p = json!({"x": 0, "y": 0, "width": 10, "height": 10});
+        if let Some(id) = &parent {
+            p["parent"] = id.clone();
+        }
+        let r = app.session.execute("frame.create", &p).unwrap();
+        parent = Some(r["id"].clone());
+    }
+    let r = handle(&mut app, "document.inspect", json!({"depth": u64::MAX, "allPages": false})).unwrap();
+    fn nesting(v: &Value) -> usize {
+        v["children"].as_array().map_or(0, |c| 1 + c.iter().map(nesting).max().unwrap_or(0))
+    }
+    let n = nesting(&r["pages"][0]);
+    assert!(n <= 64, "inspect nested {n} levels");
 }

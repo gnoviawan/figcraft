@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use figcraft_doc::*;
 use figcraft_geom::Affine;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::{CommandSpec, ok};
 use crate::params::*;
@@ -18,13 +18,19 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "edit.duplicate",
             "Duplicate",
-            "{ids?, dx?, dy? (page offset; default: the offset of the last duplicate when ids are its copies, still selected; else top-level frames to the right with a 100 gap, everything else in place)}",
+            "{ids?, dx?, dy? (page offset; default: the offset of the last duplicate when ids are its copies, still selected; else top-level frames to the right with a 100 gap, everything else in place)}  a main component's copy is an instance of it (a variant stays a new variant in its set)",
             true,
             duplicate
         ),
         spec!("edit.copy", "Copy", "{ids?}", false, copy),
         spec!("edit.cut", "Cut", "{ids?}", true, cut),
-        spec!("edit.paste", "Paste", "{parent?, x?, y? (page coordinates of the pasted top-left)}", true, paste),
+        spec!(
+            "edit.paste",
+            "Paste",
+            "{parent?, x?, y? (page coordinates of the pasted top-left)}  a copied main component pastes as an instance of it within its file (cut ones, and pastes into other files, keep the component)",
+            true,
+            paste
+        ),
         spec!(
             "edit.pasteDesignLayers",
             "Paste design layers",
@@ -217,7 +223,13 @@ pub fn specs() -> Vec<CommandSpec> {
             false,
             find_issues
         ),
-        spec!("node.reparent", "Move layer into", "{ids?, parent, index?}", true, reparent),
+        spec!(
+            "node.reparent",
+            "Move layer into",
+            "{ids?, parent, index? (final position among parent's children, bottom first; default top)}",
+            true,
+            reparent
+        ),
         spec!("node.reorder", "Reorder layer", "{id, index}", true, |s, p| {
             let i = req_id("node.reorder", p, "id")?;
             let idx = req_num("node.reorder", p, "index")?.max(0.0) as usize;
@@ -268,8 +280,7 @@ pub fn specs() -> Vec<CommandSpec> {
         }),
         spec!("effect.set", "Set effect", "{ids?, index, effect {..}}", true, |s, p| {
             let i = req_index("effect.set", p, "index")?;
-            let e: Effect = parse("effect.set", p, "effect")?.ok_or_else(|| bad("effect.set", "`effect` required"))?;
-            check_effect(&e).map_err(|why| bad("effect.set", format!("`effect`: {why}")))?;
+            let e = super::props::effect_from("effect.set", p, "effect")?.ok_or_else(|| bad("effect.set", "`effect` required"))?;
             for id in req_targets("effect.set", s, p)? {
                 let n = s.doc_mut()?.get_mut(id)?;
                 if let Some(slot) = n.effects.get_mut(i) {
@@ -476,7 +487,7 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         let top_frame = doc.node(parent).is_some_and(Node::is_page) && n.kind.is_frame_like();
         let idx = doc.index_in_parent(i).map(|x| x + 1);
         let w = n.width;
-        let nid = doc.duplicate_into(i, parent, idx)?;
+        let nid = crate::components::copy_in_file(doc, i, parent, idx)?;
         let (dx, dy) = match (num(p, "dx"), num(p, "dy")) {
             (Some(dx), dy) => (dx, dy.unwrap_or(0.0)),
             (None, Some(dy)) => (0.0, dy),
@@ -491,12 +502,16 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
                 nn.transform = Affine::translate((dx, dy)) * nn.transform;
             }
         }
-        if rename {
+        // An instance keeps the name instances get by default.
+        if rename && !matches!(doc.get(nid)?.kind, NodeKind::Instance { .. }) {
             let nn = doc.get_mut(nid)?;
             nn.name = bump_name(&nn.name);
         }
         out.push(nid);
     }
+    // Board connectors copied with what they join join the copies.
+    let map = crate::board::copy_map(doc, &ids, &out);
+    crate::board::rejoin(doc, &crate::board::copied_items(doc, &map), &map, false);
     s.set_selection(out.clone());
     s.ds_mut()?.last_duplicate = Some(Duplicated { sources: ids, copies: out.clone() });
     Ok(json!({"ids": out}))
@@ -525,6 +540,13 @@ pub fn copy_to_clipboard(s: &mut Session, cmd: &str, ids: &[NodeId]) -> Result<(
     s.clipboard.source = Some(source);
     s.clipboard.source_path = source_path;
     s.clipboard.source_doc = uid;
+    s.clipboard.copied_components = nodes
+        .iter()
+        .filter(|(_, sub)| {
+            cmd == "edit.copy" && sub.first().is_some_and(|n| matches!(n.kind, NodeKind::Component { .. } | NodeKind::ComponentSet { .. }))
+        })
+        .map(|(root, _)| *root)
+        .collect();
     s.clipboard.nodes = nodes;
     s.clipboard.images = images;
     s.clipboard.bounds = bounds;
@@ -603,7 +625,8 @@ fn paste_design_layers(s: &mut Session, p: &Value) -> Result<Value> {
     let (nodes, images, bounds) = copied(&doc, &tops);
     let props = s.clipboard.props.take();
     // No open file has id 0. So paste treats this copy as a copy from a different file.
-    s.clipboard = crate::Clipboard { nodes, images, props, bounds, source_doc: 0, source: Some(doc), source_path: None };
+    s.clipboard =
+        crate::Clipboard { nodes, images, props, bounds, source_doc: 0, source: Some(doc), source_path: None, copied_components: BTreeSet::new() };
     let mut out = paste(s, p)?;
     if !other.issues.is_empty() {
         out["warnings"] = json!(other.issues);
@@ -633,6 +656,7 @@ pub fn paste_into(s: &mut Session, parent: NodeId, at: Option<(f64, f64)>) -> Re
     }
     // From another file: its instances follow the mains this file can have.
     let foreign = clip.source.as_ref().filter(|_| s.ds().is_ok_and(|d| d.uid != clip.source_doc));
+    let copy_local = s.ds()?.uid == clip.source_doc;
     let doc = s.doc_mut()?;
     for (k, v) in &clip.images {
         doc.images.entry(k.clone()).or_insert_with(|| v.clone());
@@ -646,6 +670,16 @@ pub fn paste_into(s: &mut Session, parent: NodeId, at: Option<(f64, f64)>) -> Re
     let mut out = Vec::new();
     let mut all = BTreeMap::new();
     for (root, nodes) in &clip.nodes {
+        if copy_local
+            && clip.copied_components.contains(root)
+            && let Some(n) = nodes.first().filter(|n| matches!(n.kind, NodeKind::Component { .. }))
+            && doc.node(*root).is_some_and(|n| matches!(n.kind, NodeKind::Component { .. }))
+        {
+            let instance = crate::components::create_instance(doc, *root, parent, 0.0, 0.0)?;
+            doc.get_mut(instance)?.transform = doc.world_transform(parent).inverse() * shift * n.transform;
+            out.push(instance);
+            continue;
+        }
         let mut map = BTreeMap::new();
         for n in nodes {
             map.insert(n.id, doc.alloc_id());
@@ -659,6 +693,10 @@ pub fn paste_into(s: &mut Session, parent: NodeId, at: Option<(f64, f64)>) -> Re
         out.push(doc.paste_nodes(&nodes, &map, *root, into, None)?);
         all.extend(map);
     }
+    // Board connectors pasted with what they join join the pasted copies.
+    let originals: Vec<(NodeId, figcraft_doc::BoardItem)> =
+        clip.nodes.iter().flat_map(|(_, nodes)| nodes).filter_map(|n| Some((*all.get(&n.id)?, n.board.clone()?))).collect();
+    crate::board::rejoin(doc, &originals, &all, !copy_local);
     if let Some(src) = foreign {
         crate::library::adopt_pasted(doc, src, clip.source_path.as_deref(), &all)?;
     }
@@ -671,10 +709,15 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
     // else in the frame's centre; otherwise in place on the page (or the viewport centre).
     let sel = s.selection();
     let doc = s.doc()?;
+    let copy_local = s.ds()?.uid == s.clipboard.source_doc;
     let target = id(p, "parent").or_else(|| {
         sel.first()
             .copied()
-            .filter(|i| sel.len() == 1 && doc.node(*i).is_some_and(|n| n.kind.is_frame_like() && !matches!(n.kind, NodeKind::Instance { .. })))
+            .filter(|i| {
+                sel.len() == 1
+                    && doc.node(*i).is_some_and(|n| n.kind.is_frame_like() && !matches!(n.kind, NodeKind::Instance { .. }) && !n.is_board_atom())
+            })
+            .filter(|i| !copy_local || !s.clipboard.copied_components.iter().any(|root| doc.is_ancestor(*root, *i)))
     });
     let parent = target.unwrap_or(page);
     let at = match (num(p, "x"), num(p, "y")) {
@@ -941,9 +984,13 @@ pub fn opacity_from_digits(digits: &str) -> Option<f32> {
 fn opacity_keys(s: &mut Session, p: &Value) -> Result<Value> {
     let digits = req_string("object.opacityKeys", p, "digits")?;
     let o = opacity_from_digits(&digits).ok_or_else(|| bad("object.opacityKeys", "`digits` must be one or two digits"))?;
-    for i in req_targets("object.opacityKeys", s, p)? {
-        s.doc_mut()?.get_mut(i)?.opacity = o;
+    let ids = req_targets("object.opacityKeys", s, p)?;
+    let doc = s.doc_mut()?;
+    let before = super::styles::bound_before(doc, &ids);
+    for i in ids {
+        doc.get_mut(i)?.opacity = o;
     }
+    super::styles::detach_edited(doc, &before);
     Ok(json!({"opacity": o}))
 }
 
@@ -1145,6 +1192,9 @@ fn find_issues(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"issues": crate::issues::find(doc, &ids)}))
 }
 
+/// Keys only some layer types take, the test for those layers, and why the others skip them.
+type TypedKeys<'a> = (&'a [&'a str], &'a dyn Fn(&Node) -> bool, &'a str);
+
 fn set(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = req_targets("node.set", s, p)?;
     let props = match get(p, "props") {
@@ -1175,34 +1225,46 @@ fn set(s: &mut Session, p: &Value) -> Result<Value> {
         None => Vec::new(),
     };
     let mut warnings = Vec::new();
-    // Auto layout keys go to the layers that can have auto layout; with none among the targets,
-    // the first refuses them (`props::layout_mut`).
+    // Type-specific keys go to the layers that take them and are skipped, with a warning, on the
+    // others: auto layout keys to frame-like layers, `path` to vectors. With none among the targets
+    // that take them, the first refuses them (`props::layout_mut`, `props::apply`).
+    let doc = &s.ds()?.doc;
     let layout_keys: Vec<&str> = props.keys().map(String::as_str).filter(|k| super::props::LAYOUT_KEYS.contains(k)).collect();
-    let mut without_layout = props.clone();
-    let mut skipped = BTreeSet::new();
-    if !layout_keys.is_empty() {
-        let doc = &s.ds()?.doc;
-        let frame_like = |i: &NodeId| doc.node(*i).is_some_and(|n| n.kind.is_frame_like());
-        if ids.iter().any(frame_like) {
-            skipped = ids.iter().copied().filter(|i| !frame_like(i)).collect();
-            without_layout.retain(|k, _| !layout_keys.contains(&k.as_str()));
+    let path_keys: Vec<&str> = props.keys().map(String::as_str).filter(|k| *k == "path").collect();
+    let frame_like = |n: &Node| n.kind.is_frame_like();
+    let vector = |n: &Node| matches!(n.kind, NodeKind::Vector { .. });
+    let typed: [TypedKeys; 2] = [
+        (&layout_keys, &frame_like, "only frames, components and instances have auto layout"),
+        (&path_keys, &vector, "only vector layers have a path"),
+    ];
+    let mut skipped: BTreeMap<NodeId, Map<String, Value>> = BTreeMap::new();
+    for (keys, takes, why) in typed {
+        let takes = |i: &NodeId| doc.node(*i).is_some_and(takes);
+        if keys.is_empty() || !ids.iter().any(takes) {
+            continue;
         }
-        if !skipped.is_empty() {
-            let names: Vec<String> =
-                skipped.iter().take(10).filter_map(|i| doc.node(*i)).map(|n| format!("{} “{}” ({})", n.id, n.name, n.kind.type_name())).collect();
-            let more = if skipped.len() > names.len() { format!(" and {} more", skipped.len() - names.len()) } else { String::new() };
-            warnings.push(format!(
-                "{} skipped on {}{more}: only frames, components and instances have auto layout",
-                layout_keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "),
-                names.join(", ")
-            ));
+        let others: Vec<NodeId> = ids.iter().copied().filter(|i| !takes(i)).collect();
+        if others.is_empty() {
+            continue;
         }
+        for i in &others {
+            skipped.entry(*i).or_insert_with(|| props.clone()).retain(|k, _| !keys.contains(&k.as_str()));
+        }
+        let names: Vec<String> =
+            others.iter().take(10).filter_map(|i| doc.node(*i)).map(|n| format!("{} “{}” ({})", n.id, n.name, n.kind.type_name())).collect();
+        let more = if others.len() > names.len() { format!(" and {} more", others.len() - names.len()) } else { String::new() };
+        warnings.push(format!(
+            "{} skipped on {}{more}: {why}",
+            keys.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", "),
+            names.join(", ")
+        ));
     }
     let doc = s.doc_mut()?;
+    let before = super::styles::bound_before(doc, &ids);
     for &i in &ids {
-        let props = if skipped.contains(&i) { &without_layout } else { &props };
-        super::props::apply("node.set", doc, i, props)?;
+        super::props::apply("node.set", doc, i, skipped.get(&i).unwrap_or(&props))?;
     }
+    super::styles::detach_edited(doc, &before);
     warnings.extend(super::props::font_warnings(doc, &ids, &props));
     if props.contains_key("x") || props.contains_key("y") {
         warnings.extend(super::props::layout_position_warning(doc, &ids));
@@ -1254,9 +1316,10 @@ fn reparent(s: &mut Session, p: &Value) -> Result<Value> {
     let index = num(p, "index").map(|i| i.max(0.0) as usize);
     let doc = s.doc_mut()?;
     let ids = z_sorted(doc, &roots(doc, &ids));
-    // The layers land together under the first sibling at or above `index` that stays put (none: on
-    // top), wherever they came from.
-    let above = index.and_then(|at| doc.get(parent).ok()?.children.iter().skip(at).find(|c| !ids.contains(c)).copied());
+    // `index` is where the first moved layer ends up among the parent's children (bottom first),
+    // counted after the move, the way `node.reorder` counts it. The layers land together, keeping
+    // their order, under the sibling that stays put and ends up just after them (none: on top).
+    let above = index.and_then(|at| doc.get(parent).ok()?.children.iter().filter(|c| !ids.contains(c)).nth(at).copied());
     for i in &ids {
         // Counted with the layer still in place, as `reparent` expects.
         let at = above.and_then(|a| doc.node(parent)?.children.iter().position(|c| *c == a));
@@ -1318,10 +1381,12 @@ fn paint_set(s: &mut Session, p: &Value, fills: bool) -> Result<Value> {
             slot.kind = figcraft_color::PaintKind::Solid { color: c.with_alpha(1.0) };
             if c.a < 1.0 {
                 slot.opacity = c.a;
+                slot.color_alpha = c.a;
             }
         }
         if let Some(o) = opacity {
             slot.opacity = o as f32;
+            slot.color_alpha = 1.0;
         }
         if let Some(v) = boolean(p, "visible") {
             slot.visible = v;
@@ -1329,7 +1394,7 @@ fn paint_set(s: &mut Session, p: &Value, fills: bool) -> Result<Value> {
         if let Some(b) = blend(p, "blend") {
             slot.blend = b;
         }
-        super::lists::remap_stop_bindings(n, fills, at, &old);
+        super::lists::rebind_edited_paint(n, fills, at, &old);
         if fills {
             n.styles.fill = None;
         } else {
@@ -1343,7 +1408,7 @@ fn pattern_fill(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "fill.pattern";
     let src = req_id(CMD, p, "source")?;
     let doc = s.doc()?;
-    if !doc.node(src).is_some_and(|n| !n.is_page()) {
+    if doc.node(src).is_none_or(|n| n.is_page()) {
         return Err(bad(CMD, "`source` must be a layer"));
     }
     if req_targets(CMD, s, p)?.iter().any(|t| doc.is_ancestor(*t, src)) {
@@ -1363,14 +1428,13 @@ fn pattern_fill(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn effect_add(s: &mut Session, p: &Value) -> Result<Value> {
-    let e: Effect = match get(p, "effect") {
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| bad("effect.add", e.to_string()))?,
+    let e: Effect = match super::props::effect_from("effect.add", p, "effect")? {
+        Some(e) => e,
         None => {
             let ty = string(p, "type").unwrap_or_else(|| "dropShadow".into());
             Effect::of_type(&ty).ok_or_else(|| bad("effect.add", format!("unknown effect type `{ty}`")))?
         }
     };
-    check_effect(&e).map_err(|why| bad("effect.add", format!("`effect`: {why}")))?;
     for i in req_targets("effect.add", s, p)? {
         s.doc_mut()?.get_mut(i)?.effects.push(e.clone());
     }

@@ -179,10 +179,11 @@ fn font_rows(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], styles: &[TextStyle]
     let fstyle = uniform(styles, |s| s.font_style.clone());
     row(ui, 32.0, |ui| {
         let w = ui.available_width();
-        let missing = family.as_deref().is_some_and(|f| !figcraft_text::db().read().unwrap_or_else(std::sync::PoisonError::into_inner).has_family(f));
-        let resp = widgets::dropdown(ui, family.as_deref().unwrap_or(tr(MIXED)), w, missing.then_some(Icon::GamutWarning));
-        let resp = if missing { resp.on_hover_text(tr("Font not installed")) } else { resp };
+        let resp = font_dropdown(app, ui, ids, "fontFamily", family.as_deref(), w, editing);
         menu_popup(&resp).width(w.max(240.0)).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            if !editing && apply_variable_item(ui, ids, "fontFamily", &resp) {
+                return;
+            }
             let pick = font_picker(ui, family.as_deref(), resp.clicked());
             if let Some(f) = pick.picked {
                 remember_family(ui.ctx(), &f);
@@ -199,29 +200,34 @@ fn font_rows(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], styles: &[TextStyle]
     // Style + size.
     let half = (ui.available_width() - PAD * 2.0 - 8.0) / 2.0;
     row(ui, 32.0, |ui| {
-        let resp = widgets::dropdown(ui, fstyle.as_deref().unwrap_or(tr(MIXED)), half, None);
+        let resp = font_dropdown(app, ui, ids, "fontStyle", fstyle.as_deref(), half, editing);
         let fam = family.clone();
-        menu_popup(&resp).width(200.0).show(|ui| match &fam {
-            Some(fam) => {
-                let list = figcraft_text::family_styles(fam);
-                if list.is_empty() {
-                    widgets::label(ui, tr("Font not installed"), t.text_tertiary);
-                }
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    for s in list {
-                        let mark = if fstyle.as_deref() == Some(s.as_str()) { "✓ " } else { "   " };
-                        let (clicked, hovered) = menu_item_hover(ui, &format!("{mark}{s}"));
-                        if clicked {
-                            apply_style(app, "fontStyle", json!(s));
-                            ui.close();
-                        } else if hovered {
-                            // The canvas shows the style (a variable font's named instance too).
-                            app.preview_text(ui.ctx(), "text.style", text_style_params(ids, range, json!({"fontStyle": s})));
-                        }
-                    }
-                });
+        menu_popup(&resp).width(200.0).show(|ui| {
+            if !editing && apply_variable_item(ui, ids, "fontStyle", &resp) {
+                return;
             }
-            None => widgets::label(ui, tr("Pick one font family first"), t.text_tertiary),
+            match &fam {
+                Some(fam) => {
+                    let list = figcraft_text::family_styles(fam);
+                    if list.is_empty() {
+                        widgets::label(ui, tr("Font not installed"), t.text_tertiary);
+                    }
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for s in list {
+                            let mark = if fstyle.as_deref() == Some(s.as_str()) { "✓ " } else { "   " };
+                            let (clicked, hovered) = menu_item_hover(ui, &format!("{mark}{s}"));
+                            if clicked {
+                                apply_style(app, "fontStyle", json!(s));
+                                ui.close();
+                            } else if hovered {
+                                // The canvas shows the style (a variable font's named instance too).
+                                app.preview_text(ui.ctx(), "text.style", text_style_params(ids, range, json!({"fontStyle": s})));
+                            }
+                        }
+                    });
+                }
+                None => widgets::label(ui, tr("Pick one font family first"), t.text_tertiary),
+            }
         });
         let size = uniform(styles, |s| s.font_size);
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -357,6 +363,35 @@ fn menu_item_hover(ui: &mut Ui, label: &str) -> (bool, bool) {
     (r.clicked(), r.hovered())
 }
 
+/// The font family or font style dropdown for `field`, `width` wide, showing `shown` (Mixed when
+/// None). While whole layers are edited and `field` is bound to the same variable on every one of
+/// `ids`, the variable's chip is drawn in place of the dropdown (a click picks another variable,
+/// its detach button unbinds it), and the returned response opens no menu.
+fn font_dropdown(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], field: &str, shown: Option<&str>, width: f32, editing: bool) -> egui::Response {
+    if !editing && app.session.doc().ok().and_then(|d| crate::variable_ui::bound_name(d, ids, field)).is_some() {
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
+        crate::variable_ui::bound_chip(app, ui, ids, field, VariableType::String, rect);
+        return resp;
+    }
+    // A family no font here has is flagged, so it does not pass for the face it falls back to.
+    let missing = field == "fontFamily" && shown.is_some_and(|f| !figcraft_text::has_family(f));
+    let resp = widgets::dropdown(ui, shown.unwrap_or(tr(MIXED)), width, missing.then_some(Icon::GamutWarning));
+    if missing { resp.on_hover_text(tr("Font not installed")) } else { resp }
+}
+
+/// Apply variable at the top of the font family or font style menu opened from `anchor`: a click
+/// opens the variable picker on string variables for `field` of `ids` and closes the menu (true).
+fn apply_variable_item(ui: &mut Ui, ids: &[NodeId], field: &str, anchor: &egui::Response) -> bool {
+    let picked = menu_item(ui, tr("Apply variable"), "");
+    if picked {
+        crate::variable_ui::open(ui, ids, field, VariableType::String, anchor.rect.left_bottom());
+        ui.close();
+    } else {
+        ui.separator();
+    }
+    picked
+}
+
 /// Run `cmd` as a live preview while scrubbing; the gesture becomes one undo step when `done`.
 /// (While text is edited, run commands directly: the editing session already groups undo.)
 pub(crate) fn live(app: &mut FigApp, label: &str, cmd: &str, params: Value, done: bool) {
@@ -470,17 +505,15 @@ fn type_settings(
         // Indent applies to start-aligned text only; elsewhere the field stays visible but off.
         let start_aligned =
             common(doc, ids, |n| n.kind.text().map(|t| t.align_h != TextAlignH::Center && t.align_h != TextAlignH::Justified)).flatten();
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(start_aligned != Some(false), |ui| {
-                ui.add_sized(vec2(110.0, FIELD_H), egui::Label::new(egui::RichText::new(tr("Paragraph indent")).font(regular(11.0)).color(t.text)));
-                let field = widgets::number_field(ui, Id::new("ty_indent"), Lead::None, indent, "", w - 118.0, 1.0);
-                if let Some(FieldEdit::Set(v) | FieldEdit::Scrub(v, true)) = field {
-                    app.set_props(ids, json!({"paragraphIndent": v.clamp(0.0, 10_000.0)}));
-                }
-            })
-            .response
-            .on_disabled_hover_text(tr("Paragraph indent applies to left-aligned text"));
-        });
+        ui.add_enabled_ui(start_aligned != Some(false), |ui| {
+            let field =
+                field_row(ui, tr("Paragraph indent"), |ui, fw| widgets::number_field(ui, Id::new("ty_indent"), Lead::None, indent, "", fw, 1.0));
+            if let Some(FieldEdit::Set(v) | FieldEdit::Scrub(v, true)) = field {
+                app.set_props(ids, json!({"paragraphIndent": v.clamp(0.0, 10_000.0)}));
+            }
+        })
+        .response
+        .on_disabled_hover_text(tr("Paragraph indent applies to left-aligned text"));
         ui.add_space(4.0);
         for (key, label) in [("hangingPunctuation", tr("Hanging punctuation")), ("hangingList", tr("Hanging list"))] {
             let all_on = ids.iter().all(|i| {
@@ -510,16 +543,13 @@ fn type_settings(
         if resize == Some(TextAutoResize::Truncate) {
             let max = common(doc, ids, |n| n.kind.text().map(|t| t.max_lines)).flatten();
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_sized(vec2(110.0, FIELD_H), egui::Label::new(egui::RichText::new(tr("Max lines")).font(regular(11.0)).color(t.text)));
-                let shown = max.map(f64::from).filter(|m| *m > 0.0);
-                let empty = if max.is_some() { tr("Auto") } else { tr(MIXED) };
-                if let Some(FieldEdit::Set(v) | FieldEdit::Scrub(v, true)) =
-                    widgets::number_field_or(ui, Id::new("ty_maxlines"), shown, empty, w - 118.0, 1.0)
-                {
-                    app.run("text.maxLines", json!({"ids": ids, "lines": v.round().clamp(0.0, 10_000.0)}));
-                }
-            });
+            let shown = max.map(f64::from).filter(|m| *m > 0.0);
+            let empty = if max.is_some() { tr("Auto") } else { tr(MIXED) };
+            if let Some(FieldEdit::Set(v) | FieldEdit::Scrub(v, true)) =
+                field_row(ui, tr("Max lines"), |ui, fw| widgets::number_field_or(ui, Id::new("ty_maxlines"), shown, empty, fw, 1.0))
+            {
+                app.run("text.maxLines", json!({"ids": ids, "lines": v.round().clamp(0.0, 10_000.0)}));
+            }
         }
     } else if let (2, Some(face)) = (tab, &vf) {
         variable_axes(app, ui, ids, styles, face);
@@ -544,13 +574,14 @@ fn type_settings(
     }
 }
 
-/// A Type settings row: a label, then `add` with the rest of the width.
-fn field_row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui, f32) -> R) -> R {
+/// A Type settings row: a label, then `add` with the rest of the width. A label wider than its
+/// column (French, say) narrows the field rather than the row outgrowing the popover, which then
+/// widened every frame (#1029).
+pub(crate) fn field_row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui, f32) -> R) -> R {
     let t = Tokens::get(ui.ctx());
-    let w = ui.available_width();
     ui.horizontal(|ui| {
         ui.add_sized(vec2(110.0, FIELD_H), egui::Label::new(egui::RichText::new(label).font(regular(11.0)).color(t.text)));
-        add(ui, w - 118.0)
+        add(ui, ui.available_width())
     })
     .inner
 }
@@ -589,7 +620,7 @@ fn decoration_details(app: &mut FigApp, ui: &mut Ui, styles: &[TextStyle], apply
             if !auto
                 && ui
                     .add(
-                        egui::Label::new(egui::RichText::new(tr("Auto")).font(regular(11.0)).color(Tokens::get(ui.ctx()).accent))
+                        egui::Label::new(egui::RichText::new(tr("Auto")).font(regular(11.0)).color(Tokens::get(ui.ctx()).accent_text))
                             .sense(Sense::click()),
                     )
                     .on_hover_text(tip)
@@ -715,7 +746,7 @@ fn variable_axes(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], styles: &[TextSt
     }
     if styles.iter().any(|s| !s.variations.is_empty()) {
         ui.add_space(8.0);
-        let r = ui.add(egui::Label::new(egui::RichText::new(tr("Reset to style")).font(regular(11.0)).color(t.accent)).sense(Sense::click()));
+        let r = ui.add(egui::Label::new(egui::RichText::new(tr("Reset to style")).font(regular(11.0)).color(t.accent_text)).sense(Sense::click()));
         if r.on_hover_text(tr("Back to the values the font style implies")).clicked() {
             app.run("text.setVariations", json!({"ids": ids, "variations": {}, "replace": true}));
         }
@@ -791,7 +822,7 @@ fn axis_slider(ui: &mut Ui, id: Id, axis: &figcraft_text::Axis, value: Option<f6
         let x = x_of(v);
         p.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), CornerRadius::same(2), t.accent);
         p.circle_filled(pos2(x, track.center().y), 6.0, Color32::WHITE);
-        let ring = if resp.hovered() || resp.dragged() { t.accent } else { t.border_strong };
+        let ring = if resp.hovered() || resp.dragged() { crate::theme::ACCENT } else { t.border_strong };
         p.circle_stroke(pos2(x, track.center().y), 6.0, Stroke::new(1.0, ring));
     }
     if resp.double_clicked() {
@@ -901,14 +932,14 @@ fn feature_row(ui: &mut Ui, tag: &str, label: &str, on: Option<bool>, supported:
     match on {
         Some(true) => {
             ui.painter().rect_filled(b, CornerRadius::same(3), t.accent);
-            icons::paint(ui.painter(), b.shrink(1.5), Icon::Check, Color32::WHITE);
+            icons::paint(ui.painter(), b.shrink(1.5), Icon::Check, t.accent_on);
         }
         Some(false) => {
             ui.painter().rect_stroke(b, CornerRadius::same(3), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
         }
         None => {
             ui.painter().rect_filled(b, CornerRadius::same(3), t.accent);
-            ui.painter().line_segment([pos2(b.min.x + 3.5, b.center().y), pos2(b.max.x - 3.5, b.center().y)], Stroke::new(1.5, Color32::WHITE));
+            ui.painter().line_segment([pos2(b.min.x + 3.5, b.center().y), pos2(b.max.x - 3.5, b.center().y)], Stroke::new(1.5, t.accent_on));
         }
     }
     let col = if supported { t.text } else { t.text_tertiary };
@@ -1027,7 +1058,7 @@ fn lead_field(ui: &mut Ui, id: Id, glyph: LeadGlyph, value: &str, width: f32, ti
     crate::a11y::text(&resp, tip, value);
     ui.painter().rect_filled(rect, CornerRadius::same(5), t.field);
     if editing.is_some() {
-        ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, t.accent), StrokeKind::Inside);
+        ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, crate::theme::ACCENT), StrokeKind::Inside);
     } else if resp.hovered() {
         ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, t.field_hover_border), StrokeKind::Inside);
     }
@@ -1276,7 +1307,7 @@ pub(crate) fn font_picker(ui: &mut Ui, current: Option<&str>, just_opened: bool)
                     if hovered {
                         ui.painter().rect_filled(rect, CornerRadius::same(5), t.accent);
                     }
-                    let col = if hovered { Color32::WHITE } else { t.text };
+                    let col = if hovered { t.accent_on } else { t.text };
                     if current.is_some_and(|c| c.eq_ignore_ascii_case(f)) {
                         icons::paint(
                             ui.painter(),
@@ -1424,5 +1455,149 @@ mod tests {
         assert_eq!(target_styles(&doc, &[id], Some((id, 4, 8))).len(), 2);
         assert_eq!(target_styles(&doc, &[id], Some((id, 3, 3))).len(), 2);
         assert_eq!(target_styles(&doc, &[id], None).len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod variable_tests {
+    use egui::{Event, Modifiers, PointerButton, Pos2, RawInput};
+    use figcraft_engine::Session;
+
+    use super::*;
+    use crate::NoServices;
+
+    /// The Typography section and the variable picker, drawn for a selected text layer (Inter
+    /// Regular) in a file with the string variables "Heading font" and "Heading weight" and the
+    /// number variable "Heading size".
+    struct Panel {
+        app: FigApp,
+        ctx: egui::Context,
+        time: f64,
+        text: NodeId,
+    }
+
+    impl Panel {
+        fn new() -> Self {
+            let mut s = Session::new();
+            let text = NodeId(s.execute("text.create", &json!({"text": "Title"})).unwrap()["id"].as_u64().unwrap());
+            s.execute("variable.createCollection", &json!({"name": "Type", "modes": ["Base"]})).unwrap();
+            for (name, ty, value) in
+                [("Heading font", "string", json!("Inter")), ("Heading weight", "string", json!("Bold")), ("Heading size", "number", json!(32))]
+            {
+                s.execute("variable.create", &json!({"collection": "Type", "name": name, "type": ty, "values": {"Base": value}})).unwrap();
+            }
+            s.execute("select.set", &json!({ "ids": [text] })).unwrap();
+            let mut p = Self { app: FigApp::new(s, Box::new(NoServices)), ctx: egui::Context::default(), time: 0.0, text };
+            crate::theme::install_fonts(&p.ctx, false, 0);
+            crate::theme::apply(&p.ctx, Tokens::light());
+            for _ in 0..3 {
+                p.frame(vec![]);
+            }
+            p
+        }
+
+        /// One frame with `events`; the texts drawn, with their centers.
+        fn frame(&mut self, events: Vec<Event>) -> Vec<(String, Pos2)> {
+            fn walk(shape: &egui::Shape, out: &mut Vec<(String, Pos2)>) {
+                match shape {
+                    egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.pos + t.galley.size() / 2.0)),
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                    _ => {}
+                }
+            }
+            self.time += 1.0 / 60.0;
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(280.0, 600.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let mut out = self.ctx.run_ui(input, |ui| {
+                let ds = self.app.session.ds().unwrap();
+                let doc = ds.doc.clone();
+                let sel = ds.selection.clone();
+                typography(&mut self.app, ui, &doc, &sel);
+                crate::variable_ui::picker(&mut self.app, ui.ctx());
+            });
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            for c in out.shapes {
+                walk(&c.shape, &mut texts);
+            }
+            texts
+        }
+
+        /// Hover `p`, then press and release there; the texts drawn after.
+        fn click(&mut self, p: Pos2) -> Vec<(String, Pos2)> {
+            self.frame(vec![Event::PointerMoved(p)]);
+            for pressed in [true, false] {
+                self.frame(vec![Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }]);
+            }
+            self.frame(vec![])
+        }
+
+        /// The name of the variable `field` of the text layer is bound to.
+        fn bound_to(&self, field: &str) -> Option<String> {
+            let doc = self.app.session.doc().unwrap();
+            doc.node(self.text).unwrap().bound.get(field).and_then(|v| doc.variables.get(v)).map(|v| v.name.clone())
+        }
+    }
+
+    fn at(texts: &[(String, Pos2)], s: &str) -> Pos2 {
+        texts
+            .iter()
+            .find(|(t, _)| t == s)
+            .map(|(_, p)| *p)
+            .unwrap_or_else(|| panic!("no text {s:?} in {:?}", texts.iter().map(|t| &t.0).collect::<Vec<_>>()))
+    }
+
+    fn shows(texts: &[(String, Pos2)], s: &str) -> bool {
+        texts.iter().any(|(t, _)| t == s)
+    }
+
+    #[test]
+    fn font_family_and_style_menus_start_with_apply_variable() {
+        let mut p = Panel::new();
+        for (field, shown, name) in [("fontStyle", "Regular", "Heading weight"), ("fontFamily", "Inter", "Heading font")] {
+            let texts = p.frame(vec![]);
+            let texts = p.click(at(&texts, shown));
+            let texts = p.click(at(&texts, "Apply variable"));
+            assert!(crate::variable_ui::picker_open(&p.ctx), "{field}: the variable picker opens");
+            assert!(shows(&texts, "Heading font") && shows(&texts, "Heading weight"), "{field} offers string variables");
+            assert!(!shows(&texts, "Heading size"), "{field} offers no number variables");
+            p.click(at(&texts, name));
+            assert_eq!(p.bound_to(field).as_deref(), Some(name));
+        }
+        assert!(p.app.ui.last_error.is_none(), "{:?}", p.app.ui.last_error);
+    }
+
+    #[test]
+    fn bound_font_family_and_style_show_their_variables_and_detach() {
+        let mut p = Panel::new();
+        let ids = vec![p.text];
+        for (field, var) in [("fontFamily", "Heading font"), ("fontStyle", "Heading weight")] {
+            p.app.run("variable.bind", json!({"ids": ids, "field": field, "variable": var}));
+        }
+        let texts = p.frame(vec![]);
+        assert!(shows(&texts, "Heading font") && shows(&texts, "Heading weight"), "the chips are drawn in place of the dropdowns");
+        assert!(!shows(&texts, "Inter"), "the family dropdown is not drawn");
+        // While characters are selected in the text, the dropdowns show the values, with no Apply variable.
+        figcraft_engine::textedit::begin(&mut p.app.session, p.text, Some(1), false).unwrap();
+        figcraft_engine::textedit::set_caret(&mut p.app.session, 3, true).unwrap();
+        let texts = p.frame(vec![]);
+        let texts = p.click(at(&texts, "Inter"));
+        assert!(!shows(&texts, "Apply variable"), "a selected range takes a font, not a variable");
+        p.frame(vec![Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }]);
+        figcraft_engine::textedit::end(&mut p.app.session).unwrap();
+        p.frame(vec![]);
+        for field in ["fontFamily", "fontStyle"] {
+            let rect = p.ctx.read_response(Id::new(("bound_chip", field, &ids[..])).with("bound")).expect("the chip").rect;
+            // The chip's detach button sits at its right end.
+            p.click(Pos2::new(rect.max.x - 11.0, rect.center().y));
+            assert_eq!(p.bound_to(field), None, "{field} is detached");
+        }
+        let texts = p.frame(vec![]);
+        assert!(shows(&texts, "Inter") && shows(&texts, "Bold"), "the dropdowns show the last values");
+        assert!(p.app.ui.last_error.is_none(), "{:?}", p.app.ui.last_error);
     }
 }

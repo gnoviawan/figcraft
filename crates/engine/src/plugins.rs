@@ -107,10 +107,14 @@ const DENIED: &[&str] = &[
     "plugins.",
     "libraries.",
     "library.add",
+    // Uploads the open document to a server.
+    "library.publishToServer",
     "edit.undo",
     "edit.redo",
     "edit.repeat",
     "command.batch",
+    // Runs other commands inside (duplicate, edit, export), past this policy, like a batch.
+    "data.fill",
     // Network sessions, online files and their recovery copies on disk.
     "collab.",
     // Opens files in new windows.
@@ -131,6 +135,9 @@ fn refusal(m: &Manifest, command: &str, params: &Value) -> Option<String> {
     }
     if command == "image.place" && get(params, "path").is_some() {
         return Some("plugins can't read files: pass the image as `data`".into());
+    }
+    if command == "text.loadFont" && get(params, "path").is_some() {
+        return Some("plugins can't read files: pass the font as `data`".into());
     }
     // `path` here is a file on disk (elsewhere it is a vector path or an action's place).
     if matches!(command, "variable.export" | "codeConnect.export" | "component.playground") && get(params, "path").is_some() {
@@ -155,7 +162,8 @@ fn refusal(m: &Manifest, command: &str, params: &Value) -> Option<String> {
 /// Whether `params` set layer data (`pluginData`, anywhere in them) under a widget's own keys.
 fn writes_widget_data(params: &Value, depth: usize) -> bool {
     let own = |data: &Value| data.as_object().is_some_and(|m| m.keys().any(|k| k.starts_with(crate::widgets::DATA_PREFIX)));
-    depth < 64
+    // serde_json refuses nesting past 128, so nothing deeper can reach here.
+    depth < 128
         && match params {
             Value::Object(m) => m.iter().any(|(k, v)| (k == "pluginData" && own(v)) || writes_widget_data(v, depth + 1)),
             Value::Array(a) => a.iter().any(|v| writes_widget_data(v, depth + 1)),
@@ -385,6 +393,7 @@ pub(crate) fn register(s: &mut Session, entry: InstalledPlugin, wasm: Vec<u8>) -
     match list.iter_mut().find(|x| x.manifest.id == id) {
         Some(slot) => {
             *slot = entry;
+            s.prefs.plugin_settings.remove(&id);
             true
         }
         None => {
@@ -591,4 +600,29 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("plugins.runLast", "Run last plugin", "{}", false, run_last),
         spec!("plugins.manage", "Manage plugins…", "{}  opens the plugins window; returns the list like `plugin.list`", false, manage),
     ]
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    #[test]
+    fn read_only_plugin_cannot_publish_to_server() {
+        let m = Manifest::parse(r#"{"id":"x.y","name":"X","main":"plugin.wasm"}"#).unwrap();
+        let r = refusal(&m, "library.publishToServer", &json!({}));
+        assert!(r.is_some(), "library.publishToServer uploads the document and must be refused");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widget_data_is_found_at_any_depth_serde_accepts() {
+        let depth = 100;
+        let text = format!("{}{{\"pluginData\":{{\"{}x\":1}}}}{}", "{\"a\":".repeat(depth), crate::widgets::DATA_PREFIX, "}".repeat(depth));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(writes_widget_data(&v, 0));
+    }
 }

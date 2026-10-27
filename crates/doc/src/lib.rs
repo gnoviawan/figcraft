@@ -8,6 +8,7 @@
 //! live in higher crates.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod board;
 pub mod colors;
 pub mod comments;
 pub mod geometry;
@@ -23,6 +24,7 @@ pub mod vector;
 pub mod vector_faces;
 pub mod vector_regions;
 
+pub use board::*;
 pub use colors::*;
 pub use comments::*;
 pub use figcraft_color as color;
@@ -157,6 +159,9 @@ pub struct ImageData {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub name: String,
+    /// A design file or a board (files from before boards are design files).
+    #[serde(default, skip_serializing_if = "FileKind::is_design")]
+    pub kind: FileKind,
     /// Page ids in order.
     pub pages: Vec<NodeId>,
     nodes: imbl::OrdMap<NodeId, Arc<Node>>,
@@ -221,6 +226,7 @@ impl Document {
     pub fn without_pages(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            kind: FileKind::Design,
             pages: Vec::new(),
             nodes: imbl::OrdMap::new(),
             dirty: Dirty::default(),
@@ -269,7 +275,16 @@ impl Document {
     /// A fresh unused id (in this document's client space during a collaboration session; see
     /// [`set_client_id`](Self::set_client_id)).
     pub fn alloc_id(&mut self) -> NodeId {
-        self.next_id.alloc()
+        // A file's saved `next_id` can be stale (behind ids already in use): skip taken ids.
+        let mut id = self.next_id.alloc();
+        while self.nodes.contains_key(&id) {
+            let next = self.next_id.alloc();
+            if next == id {
+                break;
+            }
+            id = next;
+        }
+        id
     }
 
     /// The id [`alloc_id`](Self::alloc_id) returns next.
@@ -453,8 +468,9 @@ impl Document {
                 return true;
             }
             guard += 1;
-            if guard > 10_000 {
-                return false;
+            // More hops than nodes means the parent chain loops; fail closed so callers reject the move.
+            if guard > self.nodes.len() {
+                return true;
             }
             cur = self.node(c).and_then(|n| n.parent);
         }
@@ -821,6 +837,11 @@ impl Document {
             return Err(DocError::NotContainer(parent));
         }
         let new_root = *map.get(&root).ok_or(DocError::NoNode(root))?;
+        // Never overwrite an existing node, or another copy, with a copy.
+        let mut copied = std::collections::BTreeSet::new();
+        if let Some(taken) = nodes.iter().filter_map(|n| map.get(&n.id)).find(|i| self.nodes.contains_key(*i) || !copied.insert(**i)) {
+            return Err(DocError::Invalid(format!("node {taken} already exists")));
+        }
         for n in nodes {
             let Some(new_id) = map.get(&n.id) else { continue };
             let mut c = n.clone();
@@ -834,6 +855,16 @@ impl Document {
                 && let Some(m) = map.get(component)
             {
                 *component = *m;
+            }
+            // A measurement copied with the layer it measures to measures to the copy; one to a
+            // layer left behind isn't copied.
+            c.measurements.retain_mut(|m| match m.to {
+                Some(t) => map.get(&t).map(|n| m.to = Some(*n)).is_some(),
+                None => true,
+            });
+            // A connector (or label) copied with what it joins joins the copies.
+            if let Some(b) = c.board.as_mut() {
+                b.remap(map);
             }
             // A pattern tiling a layer of the copy tiles the copy's layer.
             for p in c.fills.iter_mut().chain(c.strokes.iter_mut()) {
@@ -949,56 +980,85 @@ impl Document {
         self.styles.iter().find(|s| s.id == id || s.name == id)
     }
 
-    /// The effective variable modes for a node (walking up its ancestors).
+    /// The effective variable modes for a node: the ones it sets over [`Self::inherited_modes`].
     pub fn modes_for(&self, id: NodeId) -> BTreeMap<CollectionId, ModeId> {
-        let mut out = BTreeMap::new();
-        let mut chain = vec![id];
-        chain.extend(self.ancestors(id));
-        for c in chain.into_iter().rev() {
-            if let Some(n) = self.node(c) {
-                for (k, v) in &n.var_modes {
-                    out.insert(k.clone(), v.clone());
-                }
-            }
+        let mut out = self.inherited_modes(id);
+        if let Some(n) = self.node(id) {
+            out.extend(n.var_modes.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
         out
     }
 
+    /// The modes a node is on where it sets none (Auto): its ancestors', and for an instance the
+    /// ones its main component sets, which are closer than any container's.
+    pub fn inherited_modes(&self, id: NodeId) -> BTreeMap<CollectionId, ModeId> {
+        let mut out = BTreeMap::new();
+        for c in self.ancestors(id).into_iter().rev() {
+            if let Some(n) = self.node(c) {
+                out.extend(self.main_modes(n).chain(&n.var_modes).map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        if let Some(n) = self.node(id) {
+            out.extend(self.main_modes(n).map(|(k, v)| (k.clone(), v.clone())));
+        }
+        out
+    }
+
+    /// The modes an instance's main component sets (none for other layers).
+    fn main_modes<'a>(&'a self, n: &Node) -> impl Iterator<Item = (&'a CollectionId, &'a ModeId)> {
+        let main = match n.kind {
+            NodeKind::Instance { component, .. } => self.node(component),
+            _ => None,
+        };
+        main.into_iter().flat_map(|m| &m.var_modes)
+    }
+
     /// Check structural invariants (used by tests and after loading untrusted files).
     pub fn validate(&self) -> Vec<String> {
+        // Hostile files can break an invariant per child; keep only the first few reports.
+        const MAX_ISSUES: usize = 100;
+        fn note(issues: &mut Vec<String>, msg: impl FnOnce() -> String) {
+            if issues.len() < MAX_ISSUES {
+                issues.push(msg());
+            }
+        }
         let mut issues = Vec::new();
+        // Every (parent, child) edge and the page list, indexed once so each node's checks are
+        // lookups: a wide parent or a long page list doesn't make validation quadratic.
+        let edges: std::collections::BTreeSet<(NodeId, NodeId)> = self.nodes.iter().flat_map(|(p, n)| n.children.iter().map(|c| (*p, *c))).collect();
+        let page_ids: std::collections::BTreeSet<NodeId> = self.pages.iter().copied().collect();
         for (id, n) in self.nodes.iter() {
             if n.id != *id {
-                issues.push(format!("node key {id} has id {}", n.id));
+                note(&mut issues, || format!("node key {id} has id {}", n.id));
             }
             let mut seen = std::collections::BTreeSet::new();
             for c in &n.children {
                 if !seen.insert(*c) {
-                    issues.push(format!("child {c} listed twice in {id}"));
+                    note(&mut issues, || format!("child {c} listed twice in {id}"));
                 }
                 match self.node(*c) {
                     Some(cn) if cn.parent == Some(*id) => {}
-                    Some(_) => issues.push(format!("child {c} of {id} has another parent")),
-                    None => issues.push(format!("child {c} of {id} missing")),
+                    Some(_) => note(&mut issues, || format!("child {c} of {id} has another parent")),
+                    None => note(&mut issues, || format!("child {c} of {id} missing")),
                 }
             }
             if let Some(p) = n.parent
-                && !self.node(p).is_some_and(|pn| pn.children.contains(id))
+                && !(self.node(p).is_some() && edges.contains(&(p, *id)))
             {
-                issues.push(format!("{id} not listed in parent {p}"));
+                note(&mut issues, || format!("{id} not listed in parent {p}"));
             }
             // The library store's root is a page that is never listed.
-            let listed = self.pages.contains(id) || (n.is_page() && self.libraries.store == Some(*id));
+            let listed = page_ids.contains(id) || (n.is_page() && self.libraries.store == Some(*id));
             if n.is_page() != listed {
-                issues.push(format!("page list mismatch for {id}"));
+                note(&mut issues, || format!("page list mismatch for {id}"));
             }
             if n.is_page() && n.parent.is_some() {
-                issues.push(format!("page {id} has a parent"));
+                note(&mut issues, || format!("page {id} has a parent"));
             }
         }
         let reachable = self.reachable();
         for id in self.nodes.keys().filter(|k| !reachable.contains(*k)) {
-            issues.push(format!("{id} is not under a page (cycle or detached)"));
+            note(&mut issues, || format!("{id} is not under a page (cycle or detached)"));
         }
         issues
     }

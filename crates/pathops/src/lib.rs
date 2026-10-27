@@ -13,12 +13,14 @@ mod brush_tests;
 mod ops_tests;
 mod points;
 #[cfg(test)]
+mod rounded_side_strokes_tests;
+#[cfg(test)]
 mod sides_tests;
 pub mod width;
 #[cfg(test)]
 mod width_tests;
 
-use figcraft_doc::{BoolOp, StrokeAlign, StrokeCap, StrokeJoin, StrokeProps, VectorNetwork};
+use figcraft_doc::{BoolOp, StrokeAlign, StrokeCap, StrokeJoin, StrokeProps, VectorNetwork, WindingRule};
 use figcraft_geom::kurbo::{self, BezPath, Cap, Join, PathEl, PathSeg, Point, Shape, Vec2};
 
 #[derive(Debug, PartialEq)]
@@ -67,13 +69,18 @@ fn sweep<T>(f: impl FnOnce() -> Result<T, PathOpsError>) -> Result<T, PathOpsErr
 }
 
 fn binary(a: &BezPath, b: &BezPath, op: linesweeper::BinaryOp) -> Result<BezPath, PathOpsError> {
+    binary_by(a, b, linesweeper::FillRule::NonZero, op)
+}
+
+/// [`binary`] with both operands read by fill rule `rule`.
+fn binary_by(a: &BezPath, b: &BezPath, rule: linesweeper::FillRule, op: linesweeper::BinaryOp) -> Result<BezPath, PathOpsError> {
     if a.elements().is_empty() && b.elements().is_empty() {
         return Ok(BezPath::new());
     }
     if !finite(a) || !finite(b) {
         return Err(PathOpsError::BadInput);
     }
-    let contours = sweep(|| linesweeper::binary_op(&closed(a), &closed(b), linesweeper::FillRule::NonZero, op).map_err(|_| PathOpsError::BadInput))?;
+    let contours = sweep(|| linesweeper::binary_op(&closed(a), &closed(b), rule, op).map_err(|_| PathOpsError::BadInput))?;
     let mut out = BezPath::new();
     for c in contours.contours() {
         out.extend(c.path.elements().iter().copied());
@@ -321,16 +328,20 @@ pub fn stroke_outline_of(path: &BezPath, props: &StrokeProps, closed_shape: bool
         (None, None, None) => stroke_center(path, width, props),
     };
     let align = if closed_shape { props.align } else { StrokeAlign::Center };
+    // Inside/Outside clip against the shape's own fill, so an even-odd shape's holes stay holes.
+    let even_odd = net.is_some_and(|n| n.regions.iter().any(|r| r.winding == WindingRule::EvenOdd));
+    let clip = |s: BezPath, op: linesweeper::BinaryOp| {
+        if even_odd {
+            // The stroke overlaps itself (non-zero): flatten it to even-odd contours first.
+            simplify(&s).and_then(|s| binary_by(&s, path, linesweeper::FillRule::EvenOdd, op)).unwrap_or(s)
+        } else {
+            binary(&s, path, op).unwrap_or(s)
+        }
+    };
     let mut out = match align {
         StrokeAlign::Center => centred(w),
-        StrokeAlign::Inside => {
-            let s = centred(w * 2.0);
-            binary(&s, path, linesweeper::BinaryOp::Intersection).unwrap_or(s)
-        }
-        StrokeAlign::Outside => {
-            let s = centred(w * 2.0);
-            binary(&s, path, linesweeper::BinaryOp::Difference).unwrap_or(s)
-        }
+        StrokeAlign::Inside => clip(centred(w * 2.0), linesweeper::BinaryOp::Intersection),
+        StrokeAlign::Outside => clip(centred(w * 2.0), linesweeper::BinaryOp::Difference),
     };
     if let Some(st) = styled.as_ref().filter(|_| !closed_shape) {
         out.extend(st.arrowheads(w, props).elements().iter().copied());
@@ -448,6 +459,104 @@ pub fn rect_side_strokes(w: f64, h: f64, sides: [f64; 4], align: StrokeAlign) ->
     if r > 0.0 {
         p.extend(rect(ox1 - r, oy0 + t, ox1, oy1 - b).elements().iter().copied());
     }
+    p
+}
+
+/// Per-side stroke of a rectangle with corner radii `[tl, tr, br, bl]`, like CSS borders: the outer
+/// edge is the rounded rectangle (center and outside grow its box by half or all of each side's
+/// weight, and each non-zero radius with it); the inner edge is inset by each side's weight, with
+/// elliptical corners `max(0, R − weight)` across and down (square where either is 0). Corners
+/// that stay circular are smoothed like the shape's. An even-odd ring whose inner edge runs against
+/// the outer one, so it is a ring under non-zero too.
+pub fn rounded_side_strokes(w: f64, h: f64, radii: [f64; 4], smoothing: f64, sides: [f64; 4], align: StrokeAlign) -> BezPath {
+    let [t, r, b, l] = sides.map(non_negative);
+    if t + r + b + l <= 0.0 {
+        return BezPath::new();
+    }
+    let f = match align {
+        StrokeAlign::Inside => 0.0,
+        StrokeAlign::Center => 0.5,
+        StrokeAlign::Outside => 1.0,
+    };
+    // Clamped like the fill: at most half the shorter side.
+    let max_r = non_negative(w.min(h)) / 2.0;
+    let radii = radii.map(|v| non_negative(v).min(max_r));
+    // Each corner's radius with the weights across and down it, clockwise from the top-left.
+    let corners = [(radii[0], l, t), (radii[1], r, t), (radii[2], r, b), (radii[3], l, b)];
+    let outer = if align == StrokeAlign::Inside {
+        figcraft_geom::rounded_rect(w, h, radii, smoothing)
+    } else {
+        let grown = corners.map(|(rr, x, y)| if rr > 0.0 { (rr + x * f, rr + y * f) } else { (0.0, 0.0) });
+        corner_rect(figcraft_geom::Rect::new(-l * f, -t * f, w + r * f, h + b * f), grown, smoothing)
+    };
+    let k = 1.0 - f;
+    let inner = figcraft_geom::Rect::new(l * k, t * k, w - r * k, h - b * k);
+    if inner.width() <= 0.0 || inner.height() <= 0.0 {
+        return outer;
+    }
+    let (inset, fit) = fit_corners(inner, corners.map(|(rr, x, y)| ((rr - x * k).max(0.0), (rr - y * k).max(0.0))));
+    // The hole's corners sit on the outer ones, inside them, unless they were shrunk to fit or
+    // smoothed: then it may leave the outer edge.
+    ring(outer, &corner_rect(inner, inset, smoothing), fit < 1.0 || smoothing > 0.0)
+}
+
+/// Rectangle `r` with `(rx, ry)` corners, smoothed like `figcraft_geom::rounded_rect` where every
+/// corner is circular (smoothing is defined for those only).
+fn corner_rect(r: figcraft_geom::Rect, corners: [(f64, f64); 4], smoothing: f64) -> BezPath {
+    if smoothing > 0.0 && corners.iter().all(|(rx, ry)| rx == ry) {
+        return kurbo::Affine::translate((r.x0, r.y0)) * figcraft_geom::rounded_rect(r.width(), r.height(), corners.map(|c| c.0), smoothing);
+    }
+    elliptical_rect(r, corners)
+}
+
+fn non_negative(v: f64) -> f64 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// `outer` with `hole` taken out: cut out of it when the hole may leave it, else as an even-odd
+/// ring whose hole runs against it.
+fn ring(outer: BezPath, hole: &BezPath, cut: bool) -> BezPath {
+    if cut && let Ok(p) = boolean_step(&outer, hole, BoolOp::Subtract) {
+        return p;
+    }
+    let mut p = outer;
+    p.extend(hole.reverse_subpaths().elements().iter().copied());
+    p
+}
+
+/// Corner radii `(rx, ry)` for the inner box `inner`, square where either is 0, all shrunk by one
+/// factor (returned too) where two on an edge add up to more than it, as CSS shrinks radii.
+fn fit_corners(inner: figcraft_geom::Rect, corners: [(f64, f64); 4]) -> ([(f64, f64); 4], f64) {
+    let c = corners.map(|(rx, ry)| if rx > 0.0 && ry > 0.0 { (rx, ry) } else { (0.0, 0.0) });
+    let [tl, tr, br, bl] = c;
+    let edges = [(inner.width(), tl.0 + tr.0), (inner.width(), bl.0 + br.0), (inner.height(), tl.1 + bl.1), (inner.height(), tr.1 + br.1)];
+    let fit = edges.iter().filter(|(_, sum)| *sum > 0.0).fold(1.0_f64, |m, (len, sum)| m.min(len / sum));
+    (c.map(|(rx, ry)| (rx * fit, ry * fit)), fit)
+}
+
+/// Rectangle `r` with an `(rx, ry)` quarter ellipse at each corner `[tl, tr, br, bl]`, drawn like
+/// `figcraft_geom::rounded_rect` (circular corners come out the same).
+fn elliptical_rect(r: figcraft_geom::Rect, [tl, tr, br, bl]: [(f64, f64); 4]) -> BezPath {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    // Each corner, the direction of its ellipse centre from it, and the angle its quarter starts at.
+    let quarters = [
+        (Point::new(r.x1, r.y0), (-1.0, 1.0), tr, -FRAC_PI_2),
+        (Point::new(r.x1, r.y1), (-1.0, -1.0), br, 0.0),
+        (Point::new(r.x0, r.y1), (1.0, -1.0), bl, FRAC_PI_2),
+        (Point::new(r.x0, r.y0), (1.0, 1.0), tl, PI),
+    ];
+    let mut p = BezPath::new();
+    p.move_to((r.x0 + tl.0, r.y0));
+    for (corner, (sx, sy), (rx, ry), start) in quarters {
+        if rx > 0.0 && ry > 0.0 {
+            let c = Point::new(corner.x + sx * rx, corner.y + sy * ry);
+            p.line_to((c.x + rx * start.cos(), c.y + ry * start.sin()));
+            kurbo::Arc::new(c, (rx, ry), start, FRAC_PI_2, 0.0).to_cubic_beziers(0.01, |a, b, e| p.curve_to(a, b, e));
+        } else {
+            p.line_to(corner);
+        }
+    }
+    p.close_path();
     p
 }
 
@@ -608,5 +717,29 @@ mod tests {
         let props = StrokeProps { weight: 2.0, dashes: vec![10.0, 10.0], align: StrokeAlign::Center, ..Default::default() };
         let s = stroke_center(&line, 2.0, &props);
         assert!((s.area().abs() - 100.0).abs() < 2.0, "{}", s.area());
+    }
+
+    #[test]
+    fn inside_and_outside_strokes_respect_an_even_odd_hole() {
+        // A ring: both loops run the same way, so only the even-odd rule leaves the hole open.
+        let mut ring = sq(0.0, 0.0, 100.0);
+        ring.extend(sq(30.0, 30.0, 40.0).elements().iter().copied());
+        let mut net = VectorNetwork::from_path(&ring);
+        for r in &mut net.regions {
+            r.winding = figcraft_doc::WindingRule::EvenOdd;
+        }
+        let (material, hole) = (Point::new(29.0, 50.0), Point::new(31.0, 50.0));
+        let inside = StrokeProps { weight: 4.0, align: StrokeAlign::Inside, ..Default::default() };
+        let s = stroke_outline_of(&ring, &inside, true, Some(&net));
+        assert_ne!(s.winding(material), 0, "inside stroke misses the material");
+        assert_eq!(s.winding(hole), 0, "inside stroke leaks into the hole");
+        let outside = StrokeProps { align: StrokeAlign::Outside, ..inside.clone() };
+        let s = stroke_outline_of(&ring, &outside, true, Some(&net));
+        assert_eq!(s.winding(material), 0, "outside stroke covers the material");
+        assert_ne!(s.winding(hole), 0, "outside stroke misses the hole");
+        // Non-zero: the inner loop doesn't cut a hole, so its inside stroke covers both sides.
+        let nz = VectorNetwork::from_path(&ring);
+        let s = stroke_outline_of(&ring, &inside, true, Some(&nz));
+        assert!(s.winding(material) != 0 && s.winding(hole) != 0);
     }
 }

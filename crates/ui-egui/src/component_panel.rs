@@ -2,8 +2,9 @@
 //!
 //! - An instance: its main component (with a swap menu), variant dropdowns, property values,
 //!   the selected layer's overrides, and Reset / Detach / Go to main / Push changes.
-//! - A component or component set: its properties (add, rename, default, delete) and, for a set,
-//!   the variant property matrix.
+//! - A component or component set: its properties (add, rename, default, delete), Add variant
+//!   (a lone main component becomes a set) and, for a set, the variant property matrix.
+//! - Several main components: Combine as variants.
 //! - A layer inside a component: bind its visibility / text / instance to a property, or make a
 //!   frame a slot.
 //! - A slot inside an instance (and an instance's slot properties): fill it with components
@@ -11,6 +12,7 @@
 
 use egui::{Id, Sense, Ui, vec2};
 use figcraft_doc::*;
+use figcraft_engine::cmd::component::{can_add_variant, can_combine_variants};
 use figcraft_engine::components::{
     PROP_BINDING, default_variant, inside_instance, owning_component, owning_instance, slot_def, slot_edited, slots_of, variant_conflicts,
     variant_options, variant_props, variant_set,
@@ -27,7 +29,10 @@ use crate::widgets;
 
 /// Entry point (called from the Design panel header for every selection).
 pub fn instance_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
-    let [id] = sel else { return };
+    let [id] = sel else {
+        combine_ui(app, ui, doc, sel);
+        return;
+    };
     let Some(n) = doc.node(*id) else { return };
     match &n.kind {
         NodeKind::Instance { .. } => instance_ui(app, ui, doc, n),
@@ -57,6 +62,19 @@ pub fn instance_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[No
     }
 }
 
+/// Two or more main components selected: a button combines them into a component set.
+fn combine_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
+    if !can_combine_variants(doc, sel) {
+        return;
+    }
+    row(ui, 32.0, |ui| {
+        let label = crate::i18n::command("component.combineVariants", "Combine as variants");
+        if widgets::dropdown(ui, &label, 160.0, Some(Icon::ComponentSet)).clicked() {
+            app.run("component.combineVariants", json!({"ids": sel}));
+        }
+    });
+}
+
 /// A component's description: a multi-line field, saved when it loses focus.
 fn description_ui(app: &mut FigApp, ui: &mut Ui, id: NodeId, description: &str) {
     widgets::separator(ui);
@@ -70,7 +88,7 @@ fn description_ui(app: &mut FigApp, ui: &mut Ui, id: NodeId, description: &str) 
 /// Local components (and component sets, not their variants), for swap menus: (id, label), page
 /// by page. Listed once per document revision (a file with thousands of layers isn't walked every
 /// frame).
-fn local_components(app: &FigApp, ui: &Ui, doc: &Document) -> std::sync::Arc<Vec<(NodeId, String)>> {
+pub(crate) fn local_components(app: &FigApp, ui: &Ui, doc: &Document) -> std::sync::Arc<Vec<(NodeId, String)>> {
     type Cached = ((u64, u64), std::sync::Arc<Vec<(NodeId, String)>>);
     let key = app.session.ds().map(|d| (d.uid, d.revision)).unwrap_or_default();
     let id = Id::new("component_panel_local_components");
@@ -365,7 +383,8 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
             });
         }
     }
-    if is_set {
+    // A lone main component too: Add variant makes it a set of itself and the new variant.
+    if can_add_variant(doc, owner) {
         row(ui, 32.0, |ui| {
             if widgets::dropdown(ui, tr("Add variant"), 120.0, Some(Icon::Plus)).clicked() {
                 app.run("component.addVariant", json!({"id": owner}));
@@ -502,6 +521,7 @@ fn group_label(g: &str) -> String {
         "grids" => tr("Layout grids"),
         "exports" => tr("Export settings"),
         "interactions" => tr("Interactions"),
+        "modes" => tr("Variable modes"),
         "size" => tr("Size"),
         "resizing" => tr("Resizing"),
         "position" => tr("Position"),
@@ -689,35 +709,9 @@ fn instance_props(app: &mut FigApp, ui: &mut Ui, doc: &Document, n: &Node, comps
                     });
                 }
                 PropDef::InstanceSwap { preferred, .. } => {
-                    let cur = figcraft_engine::params::id_of(&v);
-                    let label = cur.and_then(|c| doc.node(c)).map(|c| c.name.clone()).unwrap_or_else(|| tr("None").into());
-                    let resp = widgets::dropdown(ui, &label, w, Some(Icon::Instance));
-                    menu_popup(&resp).width(200.0).show(|ui| {
-                        let t = Tokens::get(ui.ctx());
-                        let heading = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).font(semibold(11.0)).color(t.text_secondary));
-                        let mut pick = |ui: &mut Ui, c: NodeId, name: &str| {
-                            let current = cur == Some(c);
-                            if menu_item(ui, &format!("{}{name}", if current { "✓ " } else { "" }), "") {
-                                if !current {
-                                    app.run("instance.setProperties", json!({"ids": [id], "properties": {k.clone(): c.0}}));
-                                }
-                                ui.close();
-                            }
-                        };
-                        let preferred: Vec<(NodeId, String)> = preferred.iter().filter_map(|c| doc.node(*c).map(|n| (*c, n.name.clone()))).collect();
-                        if !preferred.is_empty() {
-                            heading(ui, tr("Preferred"));
-                            for (c, name) in &preferred {
-                                pick(ui, *c, name);
-                            }
-                            heading(ui, tr("All components"));
-                        }
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            for (c, name) in comps {
-                                pick(ui, *c, name);
-                            }
-                        });
-                    });
+                    if let Some(c) = swap_dropdown(ui, doc, figcraft_engine::params::id_of(&v), &preferred, comps, w, "").1 {
+                        app.run("instance.setProperties", json!({"ids": [id], "properties": {k.clone(): c.0}}));
+                    }
                 }
                 PropDef::Variant { .. } => {}
                 PropDef::Slot { preferred } => {
@@ -728,6 +722,54 @@ fn instance_props(app: &mut FigApp, ui: &mut Ui, doc: &Document, n: &Node, comps
             }
         });
     }
+}
+
+/// The dropdown of an instance-swap property showing component `cur`: its menu lists the
+/// property's preferred components first (when it has any), then every component in the file. The
+/// dropdown, and the component picked (picking the current one picks nothing). `name` labels it for
+/// assistive technology.
+pub(crate) fn swap_dropdown(
+    ui: &mut Ui,
+    doc: &Document,
+    cur: Option<NodeId>,
+    preferred: &[NodeId],
+    comps: &[(NodeId, String)],
+    w: f32,
+    name: &str,
+) -> (egui::Response, Option<NodeId>) {
+    let label = cur.and_then(|c| doc.node(c)).map(|c| c.name.clone()).unwrap_or_else(|| tr("None").into());
+    let resp = widgets::dropdown(ui, &label, w, Some(Icon::Instance));
+    if !name.is_empty() {
+        crate::a11y::combo(&resp, name, &label, crate::a11y::menu_open(&resp));
+    }
+    let mut picked = None;
+    menu_popup(&resp).width(200.0).show(|ui| {
+        let t = Tokens::get(ui.ctx());
+        let heading = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).font(semibold(11.0)).color(t.text_secondary));
+        let mut pick = |ui: &mut Ui, c: NodeId, name: &str| {
+            let current = cur == Some(c);
+            if menu_item(ui, &format!("{}{name}", if current { "✓ " } else { "" }), "") {
+                if !current {
+                    picked = Some(c);
+                }
+                ui.close();
+            }
+        };
+        let preferred: Vec<(NodeId, String)> = preferred.iter().filter_map(|c| doc.node(*c).map(|n| (*c, n.name.clone()))).collect();
+        if !preferred.is_empty() {
+            heading(ui, tr("Preferred"));
+            for (c, name) in &preferred {
+                pick(ui, *c, name);
+            }
+            heading(ui, tr("All components"));
+        }
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (c, name) in comps {
+                pick(ui, *c, name);
+            }
+        });
+    });
+    (resp, picked)
 }
 
 fn prop_label(ui: &mut Ui, name: &str, icon: Icon) {

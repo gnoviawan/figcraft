@@ -164,11 +164,13 @@ fn files_dialogs_history_and_plugins_are_off_limits() {
         ("file.saveAs", json!({"path": target})),
         ("file.open", json!({"path": "C:/Windows/win.ini"})),
         ("image.place", json!({"path": "secret.png"})),
+        ("text.loadFont", json!({"path": "/etc/hosts"})),
         ("library.add", json!({"path": "lib.figcraft"})),
         ("plugin.run", json!({"id": "org.test.deny"})),
         ("plugin.remove", json!({"id": "org.test.deny"})),
         ("edit.undo", json!({})),
         ("command.batch", json!({"commands": [{"command": "file.saveAs", "params": {"path": target}}]})),
+        ("data.fill", json!({"id": a, "rows": [{}], "dir": dir.to_string_lossy()})),
         ("variable.export", json!({"format": "css", "path": target})),
         ("codeConnect.export", json!({"path": target})),
         ("codeConnect.import", json!({"path": "/etc/passwd"})),
@@ -403,4 +405,14 @@ fn a_full_undo_history_keeps_its_steps_and_tampered_manifests_are_refused() {
     // A manifest edited in the preferences file is checked again before it runs.
     s.prefs.plugins[0].manifest.main = "../../elsewhere.wasm".into();
     assert!(matches!(s.execute("plugin.run", &json!({"id": "org.test.many"})), Err(EngineError::BadParams { .. })));
+}
+
+#[test]
+fn reinstalling_under_an_existing_id_drops_the_old_settings() {
+    let mut s = Session::new();
+    let m = manifest("org.test.reuse", "read", &[]);
+    install(&mut s, m.clone(), &script(&[], OnRefusal::Fail, ""));
+    s.prefs.plugin_settings.entry("org.test.reuse".into()).or_default().insert("key".into(), json!("v"));
+    install(&mut s, m, &script(&[], OnRefusal::Fail, ""));
+    assert!(!s.prefs.plugin_settings.contains_key("org.test.reuse"), "{:?}", s.prefs.plugin_settings);
 }
