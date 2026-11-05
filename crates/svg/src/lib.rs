@@ -63,6 +63,18 @@ impl Default for SvgOptions {
     }
 }
 
+struct NodePaint<'a> {
+    node: &'a Node,
+    xf: Affine,
+    depth: usize,
+    paint_clip: String,
+    kid_clip: Option<String>,
+    inherited: Option<String>,
+    outline: Option<(BezPath, figcraft_render::FillRule)>,
+    grains: String,
+    size: (f64, f64),
+}
+
 struct W<'a> {
     doc: &'a Document,
     /// The exported layers, in z-order (what backdrops see).
@@ -128,6 +140,20 @@ fn path_d(p: &BezPath) -> String {
         }
     }
     s
+}
+
+/// A stroke's path as `d` values, each with its dash attributes. A dashed one takes a `<path>` for
+/// each subpath, as each fits the pattern to its own length (see
+/// [`figcraft_pathops::width::line_dashes`]), so a viewer draws what the canvas does.
+fn dashed_pieces(path: BezPath, k: &figcraft_doc::StrokeProps) -> Vec<(String, String)> {
+    let list = |v: &[f64]| v.iter().map(|d| num(*d)).collect::<Vec<_>>().join(" ");
+    let Some(pattern) = figcraft_pathops::width::dash_pattern(k) else { return vec![(path_d(&path), String::new())] };
+    let piece = |sub: BezPath| {
+        let (dashes, offset) = figcraft_pathops::width::subpath_dashes(&sub, &pattern);
+        let start = if offset > 0.0 { format!(" stroke-dashoffset=\"{}\"", num(offset)) } else { String::new() };
+        (path_d(&sub), format!(" stroke-dasharray=\"{}\"{start}", list(&dashes)))
+    };
+    figcraft_geom::split_subpaths(&path).into_iter().map(piece).collect()
 }
 
 /// A matrix scale/shear coefficient to 6 significant digits (unlike [`num`], small values survive).
@@ -204,10 +230,9 @@ impl W<'_> {
         }
     }
 
-    /// `fill="..." [fill-opacity]` for a paint of layer `n` covering its local `area` (`xf`: local →
-    /// SVG); `None` when it paints nothing.
-    fn paint_attr(&mut self, p: &Paint, n: &Node, area: Rect, xf: Affine) -> Option<String> {
-        let (w, h) = (n.width, n.height);
+    /// `fill="..." [fill-opacity]` for a paint of layer `n` on a `w`×`h` box covering its local
+    /// `area` (`xf`: local → SVG); `None` when it paints nothing.
+    fn paint_attr(&mut self, p: &Paint, n: &Node, (w, h): (f64, f64), area: Rect, xf: Affine) -> Option<String> {
         if !p.visible || p.opacity <= 0.0 {
             return None;
         }
@@ -265,7 +290,7 @@ impl W<'_> {
                         self.diamond_pattern(&mirrored, opaque, m, area)
                     }
                     GradientKind::Angular => {
-                        let pid = self.raster_pattern(p, n, area, xf);
+                        let pid = self.raster_pattern(p, (w, h), area, xf);
                         if pid.is_some() {
                             self.warn(format!("`{}`: the angular gradient is an embedded image (SVG has no conic gradient)", n.name));
                         }
@@ -369,13 +394,13 @@ impl W<'_> {
         Some(pid)
     }
 
-    /// A pattern over local `area` holding an image of `p` (on layer `n`), drawn by the renderer
+    /// A pattern over local `area` holding an image of `p` on a `w`×`h` box, drawn by the renderer
     /// at the export's raster resolution through `xf` (local → SVG).
-    fn raster_pattern(&mut self, p: &Paint, n: &Node, area: Rect, xf: Affine) -> Option<String> {
+    fn raster_pattern(&mut self, p: &Paint, (w, h): (f64, f64), area: Rect, xf: Affine) -> Option<String> {
         let b = paint_tile(area)?;
         let s = xf.determinant().abs().sqrt();
         let view = raster_view(b, RASTER_SCALE * if s.is_finite() && s > 0.0 { s } else { 1.0 })?;
-        let pix = figcraft_render::paint::area_pixmap(p, n.width, n.height, b, view.scale, self.doc)?;
+        let pix = figcraft_render::paint::area_pixmap(p, w, h, b, view.scale, self.doc)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(figcraft_render::encode_png(&pix).ok()?);
         let (tw, th) = (num(f64::from(pix.width()) / view.scale), num(f64::from(pix.height()) / view.scale));
         let pid = self.id("pattern");
@@ -406,9 +431,11 @@ impl W<'_> {
         let cell = pt.cell(src.width, src.height, w, h)?;
         let unrotated = src.transform.inverse();
         let page_body = std::mem::take(&mut self.body);
+        // The source is one level below the layer it fills.
+        let depth = figcraft_render::layer_depth() + 1;
         let _ = figcraft_render::pattern::nested(|| {
             for (tx, ty) in &cell.tiles {
-                self.node(src.id, Affine::translate((*tx, *ty)) * Affine::scale(cell.scale) * unrotated, 0);
+                self.node(src.id, Affine::translate((*tx, *ty)) * Affine::scale(cell.scale) * unrotated, depth);
             }
             Some(())
         });
@@ -416,7 +443,8 @@ impl W<'_> {
     }
 
     /// The layer's filter: drop shadows (but those drawn as `exact` geometry: see
-    /// [`W::drop_shadows`]) and layer blur.
+    /// [`W::drop_shadows`]) and layer blurs, as the canvas draws them: the blurs one after another,
+    /// the shadows cast from and cut out by the layer they leave.
     fn filter_for(&mut self, n: &Node, exact: bool, xf: Affine) -> Option<String> {
         let fx: Vec<&figcraft_doc::Effect> = n
             .effects
@@ -448,61 +476,84 @@ impl W<'_> {
             ),
             None => format!("<filter id=\"{fid}\" x=\"-50%\" y=\"-50%\" width=\"200%\" height=\"200%\" color-interpolation-filters=\"sRGB\">"),
         };
-        // Shadows that don't show behind transparent areas are cut out where the layer is: by
-        // what its paints cover, or by its pixels (like the renderer).
+        // Layer blurs one after another, each blurring what the one before it left (like the
+        // renderer's layer effects); the last result is the layer drawn. A blur of 0 does nothing.
+        let mut layer = "SourceGraphic".to_string();
+        for (i, e) in fx.iter().enumerate() {
+            if let EffectKind::LayerBlur(b) = &e.kind
+                && b.sanitized().radius > 0.0
+            {
+                let _ = write!(f, "<feGaussianBlur in=\"{layer}\" stdDeviation=\"{}\" result=\"l{i}\"/>", num(b.sanitized().radius / 2.0));
+                layer = format!("l{i}");
+            }
+        }
+        let blurred = layer != "SourceGraphic";
+        let has_shadows = fx.iter().any(|e| matches!(e.kind, EffectKind::DropShadow(_)));
+        // Shadows are cast from the blurred layer's alpha, and those that don't show behind
+        // transparent areas are cut out where the layer is: by what its paints cover, or by its
+        // pixels (blurred).
+        if blurred && has_shadows {
+            let _ = write!(f, "<feColorMatrix in=\"{layer}\" type=\"matrix\" values=\"0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0\" result=\"la\"/>");
+        }
         let cover = self.cover_input(n, xf);
-        let knock = if cover.is_some() { "cover" } else { "SourceAlpha" };
+        let cast = if blurred { "la" } else { "SourceAlpha" };
+        let knock = if cover.is_some() {
+            "cover"
+        } else if blurred {
+            layer.as_str()
+        } else {
+            "SourceAlpha"
+        };
         f.push_str(cover.as_deref().unwrap_or_default());
         let mut merge = Vec::new();
         for (i, e) in fx.iter().enumerate() {
-            match &e.kind {
-                EffectKind::DropShadow(s) => {
-                    // Spread here (layers that aren't one outline) grows the pixels, like the renderer.
-                    let morph = if s.spread != 0.0 {
-                        format!(
-                            "<feMorphology in=\"SourceAlpha\" operator=\"{}\" radius=\"{}\" result=\"s{i}m\"/>",
-                            if s.spread > 0.0 { "dilate" } else { "erode" },
-                            num(s.spread.abs())
-                        )
-                    } else {
+            if let EffectKind::DropShadow(s) = &e.kind {
+                // Spread here (layers that aren't one outline) grows the pixels, like the renderer.
+                let morph = if s.spread != 0.0 {
+                    format!(
+                        "<feMorphology in=\"{cast}\" operator=\"{}\" radius=\"{}\" result=\"s{i}m\"/>",
+                        if s.spread > 0.0 { "dilate" } else { "erode" },
+                        num(s.spread.abs())
+                    )
+                } else {
+                    String::new()
+                };
+                let src = if morph.is_empty() { cast.to_string() } else { format!("s{i}m") };
+                let _ = write!(
+                    f,
+                    "{morph}<feOffset in=\"{src}\" dx=\"{}\" dy=\"{}\"/><feGaussianBlur stdDeviation=\"{}\"/><feColorMatrix type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\" result=\"s{i}\"/>{}",
+                    num(s.offset.0),
+                    num(s.offset.1),
+                    num(s.radius.max(0.0) / 2.0),
+                    num(f64::from(s.color.r)),
+                    num(f64::from(s.color.g)),
+                    num(f64::from(s.color.b)),
+                    num(f64::from(s.color.a)),
+                    if s.show_behind {
                         String::new()
-                    };
-                    let src = if morph.is_empty() { "SourceAlpha".to_string() } else { format!("s{i}m") };
-                    let _ = write!(
-                        f,
-                        "{morph}<feOffset in=\"{src}\" dx=\"{}\" dy=\"{}\"/><feGaussianBlur stdDeviation=\"{}\"/><feColorMatrix type=\"matrix\" values=\"0 0 0 0 {} 0 0 0 0 {} 0 0 0 0 {} 0 0 0 {} 0\" result=\"s{i}\"/>{}",
-                        num(s.offset.0),
-                        num(s.offset.1),
-                        num(s.radius.max(0.0) / 2.0),
-                        num(f64::from(s.color.r)),
-                        num(f64::from(s.color.g)),
-                        num(f64::from(s.color.b)),
-                        num(f64::from(s.color.a)),
-                        if s.show_behind {
-                            String::new()
-                        } else {
-                            format!("<feComposite in=\"s{i}\" in2=\"{knock}\" operator=\"out\" result=\"s{i}\"/>")
-                        }
-                    );
-                    merge.push(format!("s{i}"));
-                }
-                EffectKind::LayerBlur(b) => {
-                    let _ = write!(f, "<feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"{}\" result=\"blur\"/>", num(b.sanitized().radius / 2.0));
-                }
-                _ => {}
+                    } else {
+                        format!("<feComposite in=\"s{i}\" in2=\"{knock}\" operator=\"out\" result=\"s{i}\"/>")
+                    }
+                );
+                merge.push(format!("s{i}"));
             }
         }
-        let has_blur = fx.iter().any(|e| matches!(e.kind, EffectKind::LayerBlur { .. }));
         f.push_str("<feMerge>");
         for m in &merge {
             let _ = write!(f, "<feMergeNode in=\"{m}\"/>");
         }
-        let _ = write!(f, "<feMergeNode in=\"{}\"/></feMerge></filter>", if has_blur { "blur" } else { "SourceGraphic" });
+        let _ = write!(f, "<feMergeNode in=\"{layer}\"/></feMerge></filter>");
         self.defs.push_str(&f);
         Some(fid)
     }
 
     fn node(&mut self, id: NodeId, xf: Affine, depth: usize) {
+        // What the renderer draws for this layer (images of its effects, pattern cells) and its
+        // pattern sources go on from its depth: one cap for the whole export (#1082).
+        figcraft_render::at_layer_depth(depth, || self.layer(id, xf, depth));
+    }
+
+    fn layer(&mut self, id: NodeId, xf: Affine, depth: usize) {
         if depth > MAX_EXPORT_DEPTH {
             return;
         }
@@ -551,10 +602,17 @@ impl W<'_> {
         {
             self.body.push_str(&img);
         }
+        let (w, h) = (n.width, n.height);
         let outline = match &n.kind {
             NodeKind::Group | NodeKind::Page { .. } => None,
             _ => figcraft_render::node_outline(self.doc, n),
         };
+        self.render_node(NodePaint { node: n, xf, depth, paint_clip, kid_clip, inherited, outline, grains, size: (w, h) });
+        self.body.push_str("</g>");
+    }
+
+    fn render_node(&mut self, paint: NodePaint<'_>) {
+        let NodePaint { node: n, xf, depth, paint_clip, kid_clip, inherited, outline, grains, size: (w, h) } = paint;
         let closed = figcraft_doc::geometry::is_closed(n) || matches!(n.kind, NodeKind::BooleanOp { .. } | NodeKind::Text(_));
         let live_text = if self.opts.outline_text { None } else { self.text_element(n, xf) };
         let run_paths = if live_text.is_none() { text_run_paths(n) } else { None };
@@ -564,7 +622,7 @@ impl W<'_> {
             // Character ranges with their own fills: one path per style, like the canvas.
             for (path, fills) in runs {
                 for p in fills {
-                    if let Some(a) = self.paint_attr(p, n, path.bounding_box(), xf) {
+                    if let Some(a) = self.paint_attr(p, n, (n.width, n.height), path.bounding_box(), xf) {
                         let el = format!("<path transform=\"{}\" d=\"{}\" {a}/>", matrix(xf), path_d(path));
                         self.body.push_str(&clipped(&paint_clip, el));
                     }
@@ -573,102 +631,148 @@ impl W<'_> {
         } else if let Some((path, rule)) = &outline
             && closed
         {
-            let fr = if *rule == figcraft_render::FillRule::EvenOdd { " fill-rule=\"evenodd\"" } else { "" };
-            for p in &n.fills {
-                if let Some(a) = self.paint_attr(p, n, path.bounding_box(), xf) {
-                    let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(path));
-                    self.body.push_str(&clipped(&paint_clip, el));
+            if let NodeKind::Vector { network } = &n.kind
+                && network.regions.iter().any(|r| r.fills.is_some() || r.paint_space.is_some())
+            {
+                let rounded = network.rounded();
+                let net = rounded.as_ref().unwrap_or(network);
+                for (i, region) in net.regions.iter().enumerate() {
+                    let paints = region.fills.as_deref().unwrap_or(&n.fills);
+                    let fr = if region.winding == figcraft_doc::WindingRule::EvenOdd { " fill-rule=\"evenodd\"" } else { "" };
+                    if let Some(mut region_path) = net.region_path(i) {
+                        let (pw, ph, frame) = region.paint_frame(w, h);
+                        region_path.apply_affine(frame.inverse());
+                        for p in paints {
+                            if let Some(a) = self.paint_attr(p, n, (pw, ph), region_path.bounding_box(), xf * frame) {
+                                let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf * frame), path_d(&region_path));
+                                self.body.push_str(&clipped(&paint_clip, el));
+                            }
+                        }
+                    }
+                }
+            } else {
+                let fr = if *rule == figcraft_render::FillRule::EvenOdd { " fill-rule=\"evenodd\"" } else { "" };
+                for p in &n.fills {
+                    if let Some(a) = self.paint_attr(p, n, (w, h), path.bounding_box(), xf) {
+                        let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(path));
+                        self.body.push_str(&clipped(&paint_clip, el));
+                    }
                 }
             }
         }
         // Inner shadows paint over the fills, under the children and strokes.
         if let Some(o) = &outline {
-            for e in n.effects.iter().filter(|e| e.visible) {
-                if let EffectKind::InnerShadow(s) = &e.kind {
-                    self.inner_shadow(o, s, xf);
-                }
-            }
+            self.inner_shadows(n, o, xf);
         }
         if !matches!(n.kind, NodeKind::BooleanOp { .. }) && !n.children.is_empty() {
-            let mut kid_clip = kid_clip;
-            if n.clip
-                && n.kind.is_frame_like()
-                && let Some((p, _)) = &outline
-            {
-                // Its own clip, within the clips around it.
-                let cid = self.id("clip");
-                let mut cp = p.clone();
-                cp.apply_affine(xf);
-                let _ = write!(self.defs, "<clipPath id=\"{cid}\"{}><path d=\"{}\"/></clipPath>", clip_attr(&kid_clip), path_d(&cp));
-                kid_clip = Some(cid);
-            }
-            self.clip = kid_clip;
-            let kids = n.children.clone();
-            for run in self.doc.paint_runs(n) {
-                let Some(&c) = kids.get(run.start) else { continue };
-                if self.doc.node(c).is_some_and(|cn| cn.is_mask && cn.visible) {
-                    let kind = self.doc.node(c).map(|mn| mn.mask_type).unwrap_or_default();
-                    if kind == figcraft_doc::MaskType::Vector {
-                        // A vector mask is a clip path: its outline.
-                        let cid = self.id("clip");
-                        let outline =
-                            self.doc.node(c).and_then(|mn| Some((xf * mn.transform, figcraft_render::subtree_outline(self.doc, mn, depth + 1)?)));
-                        let (shape, cr) = match &outline {
-                            Some((mxf, (mp, rule))) => (
-                                format!(" transform=\"{}\" d=\"{}\"", matrix(*mxf), path_d(mp)),
-                                if *rule == figcraft_render::FillRule::EvenOdd { " clip-rule=\"evenodd\"" } else { "" },
-                            ),
-                            None => (" d=\"\"".to_string(), ""),
-                        };
-                        let _ = write!(self.defs, "<clipPath id=\"{cid}\"><path{shape}{cr}/></clipPath>");
-                        let _ = write!(self.body, "<g clip-path=\"url(#{cid})\">");
-                    } else {
-                        // The layer as drawn: its alpha or luminance masks.
-                        let mid = self.id("mask");
-                        let saved = std::mem::take(&mut self.body);
-                        let outer = self.mask.replace(c);
-                        let clip = self.clip.take();
-                        self.node(c, xf, depth + 1);
-                        self.clip = clip;
-                        self.mask = outer;
-                        let mask_body = std::mem::replace(&mut self.body, saved);
-                        let alpha = if kind == figcraft_doc::MaskType::Alpha { " style=\"mask-type:alpha\"" } else { "" };
-                        let _ = write!(self.defs, "<mask id=\"{mid}\" maskUnits=\"userSpaceOnUse\"{alpha}>{mask_body}</mask>");
-                        let _ = write!(self.body, "<g mask=\"url(#{mid})\">");
-                    }
-                    for k in kids.get(run.start + 1..run.end).unwrap_or(&[]) {
-                        self.node(*k, xf, depth + 1);
-                    }
-                    self.body.push_str("</g>");
-                } else {
-                    self.node(c, xf, depth + 1);
-                }
-            }
-            self.clip = inherited;
+            self.children(n, xf, depth, outline.as_ref(), kid_clip, inherited);
         }
         if n.has_visible_stroke()
             && let Some(simple) = self.opts.simplify_stroke.then(|| self.simple_stroke(n, xf)).flatten()
         {
             self.body.push_str(&clipped(&paint_clip, simple));
         } else if n.has_visible_stroke() {
-            let geom = match &n.kind {
-                NodeKind::BooleanOp { .. } | NodeKind::Text(_) => outline.as_ref().map(|(p, _)| p.clone()),
-                _ => figcraft_doc::geometry::stroke_geometry(n),
+            self.stroke_paths(n, xf, outline.as_ref(), closed, &paint_clip);
+        }
+        self.body.push_str(&grains);
+    }
+
+    /// Paints the children of `n`, each mask layer wrapping the layers it covers.
+    fn children(
+        &mut self,
+        n: &Node,
+        xf: Affine,
+        depth: usize,
+        outline: Option<&(BezPath, figcraft_render::FillRule)>,
+        mut kid_clip: Option<String>,
+        inherited: Option<String>,
+    ) {
+        if n.clip
+            && n.kind.is_frame_like()
+            && let Some((p, _)) = &outline
+        {
+            // Its own clip, within the clips around it.
+            let cid = self.id("clip");
+            let mut cp = p.clone();
+            cp.apply_affine(xf);
+            let _ = write!(self.defs, "<clipPath id=\"{cid}\"{}><path d=\"{}\"/></clipPath>", clip_attr(&kid_clip), path_d(&cp));
+            kid_clip = Some(cid);
+        }
+        self.clip = kid_clip;
+        let kids = n.children.clone();
+        for run in self.doc.paint_runs(n) {
+            let Some(&c) = kids.get(run.start) else { continue };
+            if self.doc.node(c).is_some_and(|cn| cn.is_mask && cn.visible) {
+                let kind = self.doc.node(c).map(|mn| mn.mask_type).unwrap_or_default();
+                self.open_mask(c, kind, xf, depth);
+                for k in kids.get(run.start + 1..run.end).unwrap_or(&[]) {
+                    self.node(*k, xf, depth + 1);
+                }
+                self.body.push_str("</g>");
+            } else {
+                self.node(c, xf, depth + 1);
+            }
+        }
+        self.clip = inherited;
+    }
+
+    /// The inner shadows of `n` over its `outline`.
+    fn inner_shadows(&mut self, n: &Node, outline: &Outline, xf: Affine) {
+        for e in n.effects.iter().filter(|e| e.visible) {
+            if let EffectKind::InnerShadow(s) = &e.kind {
+                self.inner_shadow(outline, s, xf);
+            }
+        }
+    }
+
+    /// Opens the `<g>` that the mask layer `c` clips or masks the layers after it with.
+    fn open_mask(&mut self, c: NodeId, kind: figcraft_doc::MaskType, xf: Affine, depth: usize) {
+        if kind == figcraft_doc::MaskType::Vector {
+            // A vector mask is a clip path: its outline.
+            let cid = self.id("clip");
+            let outline = self.doc.node(c).and_then(|mn| Some((xf * mn.transform, figcraft_render::subtree_outline(self.doc, mn, depth + 1)?)));
+            let (shape, cr) = match &outline {
+                Some((mxf, (mp, rule))) => (
+                    format!(" transform=\"{}\" d=\"{}\"", matrix(*mxf), path_d(mp)),
+                    if *rule == figcraft_render::FillRule::EvenOdd { " clip-rule=\"evenodd\"" } else { "" },
+                ),
+                None => (" d=\"\"".to_string(), ""),
             };
-            if let Some(g) = geom {
-                let area = figcraft_render::draw::stroke_area(n, &g, closed);
-                let even = n.stroke.sides.is_some() || (n.stroke.dashes.is_empty() && closed && n.stroke.align != figcraft_doc::StrokeAlign::Center);
-                let fr = if even { " fill-rule=\"evenodd\"" } else { "" };
-                for p in &n.strokes {
-                    if let Some(a) = self.paint_attr(p, n, area.bounding_box(), xf) {
-                        let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(&area));
-                        self.body.push_str(&clipped(&paint_clip, el));
-                    }
+            let _ = write!(self.defs, "<clipPath id=\"{cid}\"><path{shape}{cr}/></clipPath>");
+            let _ = write!(self.body, "<g clip-path=\"url(#{cid})\">");
+        } else {
+            // The layer as drawn: its alpha or luminance masks.
+            let mid = self.id("mask");
+            let saved = std::mem::take(&mut self.body);
+            let outer = self.mask.replace(c);
+            let clip = self.clip.take();
+            self.node(c, xf, depth + 1);
+            self.clip = clip;
+            self.mask = outer;
+            let mask_body = std::mem::replace(&mut self.body, saved);
+            let alpha = if kind == figcraft_doc::MaskType::Alpha { " style=\"mask-type:alpha\"" } else { "" };
+            let _ = write!(self.defs, "<mask id=\"{mid}\" maskUnits=\"userSpaceOnUse\"{alpha}>{mask_body}</mask>");
+            let _ = write!(self.body, "<g mask=\"url(#{mid})\">");
+        }
+    }
+
+    /// The visible strokes of `n` as filled outline paths.
+    fn stroke_paths(&mut self, n: &Node, xf: Affine, outline: Option<&(BezPath, figcraft_render::FillRule)>, closed: bool, paint_clip: &str) {
+        let geom = match &n.kind {
+            NodeKind::BooleanOp { .. } | NodeKind::Text(_) => outline.map(|(p, _)| p.clone()),
+            _ => figcraft_doc::geometry::stroke_geometry(n),
+        };
+        if let Some(g) = geom {
+            let area = figcraft_render::draw::stroke_area(n, &g, closed);
+            let even = n.stroke.sides.is_some() || (n.stroke.dashes.is_empty() && closed && n.stroke.align != figcraft_doc::StrokeAlign::Center);
+            let fr = if even { " fill-rule=\"evenodd\"" } else { "" };
+            for p in &n.strokes {
+                if let Some(a) = self.paint_attr(p, n, (n.width, n.height), area.bounding_box(), xf) {
+                    let el = format!("<path transform=\"{}\" d=\"{}\" {a}{fr}/>", matrix(xf), path_d(&area));
+                    self.body.push_str(&clipped(paint_clip, el));
                 }
             }
         }
-        self.body.push_str(&grains);
-        self.body.push_str("</g>");
     }
 
     /// `name` as an `id` not used yet in this file (spaces as underscores; repeats get `_2`…).
@@ -701,7 +805,7 @@ impl W<'_> {
         let st = &t.style;
         // Glyphs may reach past the box.
         let area = figcraft_render::node_outline(self.doc, n).map_or(n.local_rect(), |(o, _)| o.bounding_box().union(n.local_rect()));
-        let fill = n.fills.iter().find_map(|p| self.paint_attr(p, n, area, xf)).unwrap_or_else(|| "fill=\"none\"".into());
+        let fill = n.fills.iter().find_map(|p| self.paint_attr(p, n, (n.width, n.height), area, xf)).unwrap_or_else(|| "fill=\"none\"".into());
         let chars: Vec<char> = t.characters.chars().collect();
         let mut spans = String::new();
         let mut gxf = xf;
@@ -729,7 +833,10 @@ impl W<'_> {
                         let text = st.case.apply_between(text.trim_end_matches(['\n', '\r']), before, prev);
                         let own = match layout.styles.get(style).and_then(|s| s.fills.as_ref()) {
                             Some(fills) => {
-                                let a = fills.iter().find_map(|p| self.paint_attr(p, n, area, xf)).unwrap_or_else(|| "fill=\"none\"".into());
+                                let a = fills
+                                    .iter()
+                                    .find_map(|p| self.paint_attr(p, n, (n.width, n.height), area, xf))
+                                    .unwrap_or_else(|| "fill=\"none\"".into());
                                 format!(" {a}")
                             }
                             None => String::new(),
@@ -797,7 +904,7 @@ impl W<'_> {
                     return None;
                 }
                 match n.kind {
-                    NodeKind::Ellipse { sweep, inner, .. } if inner == 0.0 && sweep >= std::f64::consts::TAU - 1e-9 => {
+                    NodeKind::Ellipse { sweep, inner, .. } if inner == 0.0 && figcraft_geom::full_sweep(sweep) => {
                         figcraft_geom::kurbo::Shape::to_path(&figcraft_geom::kurbo::Ellipse::from_rect(r), 0.1)
                     }
                     NodeKind::Rectangle | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. } if n.corners.smoothing == 0.0 => {
@@ -814,7 +921,7 @@ impl W<'_> {
             }
             _ => return None,
         };
-        let cap = match k.cap_start {
+        let cap = match k.band_caps()[0] {
             StrokeCap::Round => " stroke-linecap=\"round\"",
             StrokeCap::Square => " stroke-linecap=\"square\"",
             _ => "",
@@ -825,25 +932,18 @@ impl W<'_> {
             StrokeJoin::Round => " stroke-linejoin=\"round\"".into(),
             StrokeJoin::Bevel => " stroke-linejoin=\"bevel\"".into(),
         };
-        let dash = if k.dashes.is_empty() {
-            String::new()
-        } else {
-            format!(" stroke-dasharray=\"{}\"", k.dashes.iter().map(|d| num(*d)).collect::<Vec<_>>().join(" "))
-        };
         // Mitred corners reach furthest past the path: half the weight times the miter limit.
         let reach = w / 2.0 * k.miter_limit.max(1.0);
         let area = path.bounding_box().inflate(reach, reach);
+        let pieces = dashed_pieces(path, k);
         let mut out = String::new();
         for p in &n.strokes {
-            if let Some(a) = self.paint_attr(p, n, area, xf) {
+            if let Some(a) = self.paint_attr(p, n, (n.width, n.height), area, xf) {
                 let a = a.replace("fill-opacity=", "stroke-opacity=").replacen("fill=", "stroke=", 1);
-                let _ = write!(
-                    out,
-                    "<path transform=\"{}\" d=\"{}\" fill=\"none\" {a} stroke-width=\"{}\"{cap}{join}{dash}/>",
-                    matrix(xf),
-                    path_d(&path),
-                    num(w)
-                );
+                for (d, dash) in &pieces {
+                    let _ =
+                        write!(out, "<path transform=\"{}\" d=\"{d}\" fill=\"none\" {a} stroke-width=\"{}\"{cap}{join}{dash}/>", matrix(xf), num(w));
+                }
             }
         }
         Some(out)
@@ -885,8 +985,9 @@ impl W<'_> {
         let whole = has(&|k| matches!(k, EffectKind::Texture(_)))
             || has(&|k| matches!(k, EffectKind::LayerBlur(b) if b.is_progressive()))
             || (has(&|k| matches!(k, EffectKind::Noise(_))) && has(&|k| matches!(k, EffectKind::LayerBlur(_))))
-            // A group's inner shadows are cast by its layers' pixels, over them.
-            || (matches!(n.kind, NodeKind::Group) && has(&|k| matches!(k, EffectKind::InnerShadow(_))));
+            // A group's inner shadows are cast by its layers' pixels, over them; an image fill's by
+            // its alpha.
+            || (has(&|k| matches!(k, EffectKind::InnerShadow(_))) && figcraft_render::shadow::inner_from_pixels(self.doc, n));
         if !whole {
             return false;
         }
@@ -1056,10 +1157,14 @@ impl W<'_> {
             else {
                 continue;
             };
-            let reach = s.spread.abs() * SPREAD_MITER_LIMIT + s.radius.abs() * 1.5 + 2.0;
+            // The spread grows the outline in its own units (mitres up to the limit), drawn through
+            // `xf`: as far across and down as a local step that long goes. The blur is in page units.
+            let spread = if s.spread.is_finite() { s.spread.abs() * SPREAD_MITER_LIMIT } else { 0.0 };
+            let [a, b_, c, d, _, _] = xf.as_coeffs();
+            let blur = s.radius.abs() * 1.5 + 2.0;
+            let region = b.inflate(spread * a.hypot(c) + blur, spread * b_.hypot(d) + blur);
             let cover = if s.show_behind { None } else { self.cover_input(n, xf) };
-            let filter =
-                self.blur_filter(s.radius, b.inflate(reach, reach), cover.as_deref()).map(|f| format!(" filter=\"url(#{f})\"")).unwrap_or_default();
+            let filter = self.blur_filter(s.radius, region, cover.as_deref()).map(|f| format!(" filter=\"url(#{f})\"")).unwrap_or_default();
             let op = f64::from(s.color.a * n.opacity.clamp(0.0, 1.0));
             let blend = if matches!(s.blend, figcraft_color::BlendMode::Normal | figcraft_color::BlendMode::PassThrough) {
                 String::new()
@@ -1210,7 +1315,11 @@ mod effects_tests;
 #[cfg(test)]
 mod group_effects_tests;
 #[cfg(test)]
+mod image_shadow_tests;
+#[cfg(test)]
 mod mask_export_tests;
+#[cfg(test)]
+mod pattern_depth_tests;
 #[cfg(test)]
 mod raster_fx_tests;
 #[cfg(test)]

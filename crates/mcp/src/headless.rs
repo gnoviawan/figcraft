@@ -55,7 +55,12 @@ impl Headless {
     }
 
     fn execute(&mut self, cmd: &str, params: &Value) -> Result<Value, String> {
-        self.run(|s| s.execute(cmd, params))
+        self.execute_as(None, cmd, params)
+    }
+
+    /// A command for `agent` (an AI agent's name, `engine.execute {agent}`) or for the user.
+    fn execute_as(&mut self, agent: Option<&str>, cmd: &str, params: &Value) -> Result<Value, String> {
+        self.run(|s| s.execute_as(agent, cmd, params))
     }
 
     fn run(&mut self, f: impl FnOnce(&mut Session) -> figcraft_engine::Result<Value>) -> Result<Value, String> {
@@ -163,9 +168,6 @@ impl Headless {
                 "select.children" if self.single_text().is_some() => {
                     self.execute("text.edit.begin", &json!({"id": self.single_text()}))?;
                 }
-                "select.children" if self.session.tool.pen.is_some() => {
-                    let _ = self.session.pen_end();
-                }
                 // Enter on shapes edits them as vectors (several at once).
                 "select.children" if self.vector_targets().is_some() => {
                     self.execute("vector.edit.begin", &json!({"ids": self.vector_targets()}))?;
@@ -238,8 +240,8 @@ impl Headless {
     }
 }
 
-impl Backend for Headless {
-    fn call(&mut self, method: &str, p: Value) -> Result<Value, String> {
+impl Headless {
+    fn dispatch(&mut self, method: &str, p: Value) -> Result<Value, String> {
         match method {
             "engine.execute" => {
                 let cmd = p.get("command").and_then(Value::as_str).ok_or("`command` required")?.to_string();
@@ -247,10 +249,11 @@ impl Backend for Headless {
                     None | Some(Value::Null) => json!({}),
                     Some(v) => v.clone(),
                 };
+                let agent = p.get("agent").and_then(Value::as_str);
                 if b(&p, "issues") {
-                    self.run(|s| s.execute_checked(&cmd, &params).map(|(result, issues)| json!({"result": result, "issues": issues})))
+                    self.run(|s| s.execute_checked_as(agent, &cmd, &params).map(|(result, issues)| json!({"result": result, "issues": issues})))
                 } else {
-                    self.execute(&cmd, &params)
+                    self.execute_as(agent, &cmd, &params)
                 }
             }
             "engine.commands" => Ok(Value::Array(
@@ -258,7 +261,8 @@ impl Backend for Headless {
             )),
             "document.inspect" => {
                 let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(8).min(64) as usize;
-                Ok(figcraft_engine::inspect::document(&self.session, depth, b(&p, "allPages")))
+                let options = figcraft_engine::inspect::InspectOptions::parse(&p)?;
+                Ok(figcraft_engine::inspect::document_with_options(&self.session, depth, b(&p, "allPages"), &options))
             }
             "node.get" => {
                 let id = p.get("id").and_then(figcraft_engine::params::id_of).ok_or("`id` required (a node id)")?;
@@ -267,7 +271,8 @@ impl Backend for Headless {
                 if !doc.contains(id) {
                     return Err(format!("no such node {id}"));
                 }
-                Ok(figcraft_engine::inspect::node_json(doc, id, depth))
+                let options = figcraft_engine::inspect::InspectOptions::parse(&p)?;
+                Ok(figcraft_engine::inspect::node_json_with_options(doc, id, depth, &options))
             }
             "ui.inspect" => Ok(self.inspect_ui()),
             "ui.pointer" => self.pointer(&p),
@@ -292,9 +297,29 @@ impl Backend for Headless {
                     None => Ok(json!({"format": "png", "width": w, "height": h, "data": base64::engine::general_purpose::STANDARD.encode(&bytes)})),
                 }
             }
+            "events.poll" => {
+                let after = p.get("after").and_then(Value::as_u64).unwrap_or(0);
+                let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
+                let topics = figcraft_engine::events::topics(p.get("topics"))?;
+                // Headless has no other writer to wait for.
+                let result = self.session.events.poll(after, &topics, limit, std::time::Duration::ZERO);
+                serde_json::to_value(result).map_err(|e| e.to_string())
+            }
             "app.quit" => Ok(json!({"ok": true})),
             other => Err(format!("unknown method `{other}`")),
         }
+    }
+}
+
+impl Backend for Headless {
+    /// With `document` (an `id` from `doc.list`, or an open file's path) the call acts on that
+    /// file, and the file in front stays in front.
+    fn call(&mut self, method: &str, p: Value) -> Result<Value, String> {
+        let Some(target) = p.get("document").filter(|d| !d.is_null()) else { return self.dispatch(method, p) };
+        let forward = self.session.bring_forward(target).map_err(|e| e.to_string())?;
+        let r = self.dispatch(method, p);
+        self.session.put_back(forward);
+        r
     }
 
     fn has_ui(&self) -> bool {

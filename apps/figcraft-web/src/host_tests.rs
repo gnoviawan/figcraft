@@ -243,7 +243,7 @@ fn termul_light() -> Value {
 }
 
 /// The UI language is one per process: tests that draw frames or switch it take turns.
-static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn frame(ctx: &egui::Context, app: &mut FigApp) {
     let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui));
