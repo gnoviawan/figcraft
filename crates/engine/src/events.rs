@@ -7,10 +7,12 @@
 
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
+// `web_time`: std clocks panic in the browser build (wasm32-unknown-unknown).
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Most events kept; the oldest are dropped.
 pub const MAX_EVENTS: usize = 1024;
