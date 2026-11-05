@@ -57,6 +57,8 @@ Files: `apps/figcraft-web/src/host.rs` (plain Rust, unit-tested on the host), `b
 - **`events.poll {after?, topics?, limit?}`** → `{events, cursor, reset, dropped}`, as upstream's
   control channel and `wait_for_changes` define it. It answers at once from the session's event log
   and ignores `timeoutMs`: the page has one thread, so nothing could add an event while it waited.
+  Without `topics` it returns only `comments` events (`[]` or `["all"]` returns every topic), and
+  `limit` is 100 by default, between 1 and 1000.
   It works while the canvas is hidden and in a kiosk. The host provides the long poll by asking again
   with the same `after` until events arrive or its own timeout passes. A bad `topics` is
   `ENGINE_ERROR`.
