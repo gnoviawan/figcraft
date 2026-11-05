@@ -61,6 +61,35 @@ fn execute_runs_at_once_and_node_ids_beyond_2_pow_53_survive_as_text() {
     assert!(node.contains(&format!(r#""id":{id}"#)), "{node}");
 }
 
+/// `engine.execute {issues, agent, document}`: the call runs as the agent in the named background
+/// tab, answers `{result, issues}`, and leaves the tab in front as it was.
+#[test]
+fn execute_with_issues_runs_as_the_agent_in_the_named_document() {
+    let (mut app, ctx, mut host) = app();
+    let back = app.session.ds().unwrap().uid;
+    app.session.execute("file.new", &json!({})).unwrap();
+    let front = app.session.ds().unwrap().uid;
+    let front_doc = app.session.doc().unwrap().clone();
+    let as_claude = |command: &str, params: Value| json!({"command": command, "params": params, "issues": true, "agent": "Claude", "document": back});
+    let batch = json!({"commands": [
+        {"command": "node.create", "params": {"type": "frame", "name": "Card", "width": 240, "height": 60, "props": {"fill": "#FFFFFF"}}},
+        {"command": "node.create", "params": {"type": "text", "parent": {"$step": 0}, "x": 8, "y": 8, "text": "Faint", "props": {"fill": "#EEEEEE"}}}
+    ]});
+    let reply = ok(&mut host, &mut app, &ctx, "engine.execute", as_claude("command.batch", batch));
+    let keys: Vec<&str> = reply.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["issues", "result"], "{reply}");
+    let faint = reply["result"][1]["id"].clone();
+    assert!(reply["issues"].as_array().unwrap().iter().any(|i| i["id"] == faint && i["kind"] == "low_contrast"), "{reply}");
+    ok(&mut host, &mut app, &ctx, "engine.execute", as_claude("comment.add", json!({"x": 0, "y": 0, "text": "Check the contrast"})));
+    assert_eq!(app.session.ds().unwrap().uid, front, "the tab in front stays in front");
+    assert_eq!(app.session.doc().unwrap(), &front_doc, "the tab in front is unchanged");
+    let back_doc = &app.session.docs.iter().find(|d| d.uid == back).unwrap().doc;
+    assert!(back_doc.contains(figcraft_engine::params::id_of(&faint).unwrap()), "the text is in the named tab");
+    let list = json!({"command": "comment.list", "params": {"filter": "all"}, "document": back});
+    let thread = ok(&mut host, &mut app, &ctx, "engine.execute", list)["comments"][0].clone();
+    assert_eq!((thread["author"].clone(), thread["agent"].clone()), (json!("Claude (agent)"), json!(true)), "{thread}");
+}
+
 #[test]
 fn ui_methods_wait_for_a_frame_and_fail_at_once_while_hidden() {
     let (mut app, ctx, mut host) = app();
