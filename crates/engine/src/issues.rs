@@ -2,7 +2,7 @@
 //! reads poorly against what is behind it, layers a clipping frame cuts off, frames with no size,
 //! and characters no font draws. [`find`] checks a set of layers; [`touched`] says which layers an
 //! edit can have changed the issues of. A programmatic caller gets them after each edit
-//! (`engine.execute` with `issues: true`, see [`Session::execute_checked`](crate::Session::execute_checked))
+//! (`engine.execute` with `issues: true`, see [`Session::execute_checked_as`](crate::Session::execute_checked_as))
 //! and on demand with `doc.issues`.
 
 use std::collections::{BTreeSet, HashMap};

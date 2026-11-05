@@ -1,5 +1,5 @@
 use super::*;
-use crate::i18n::{Text, languages};
+use crate::i18n::{Forms, Text, languages};
 
 /// The About strings a rebranded build doesn't show (it shows [`ATTRIBUTION`] instead).
 const ABOUT_ONLY: &[&str] = &[
@@ -10,7 +10,7 @@ const ABOUT_ONLY: &[&str] = &[
 fn forms(text: &Text) -> Vec<&'static str> {
     match text {
         Text::Plain(s) => vec![s],
-        Text::Plural { one, few, many, other } => [*one, *few, *many, Some(*other)].into_iter().flatten().collect(),
+        Text::Plural(Forms { one, few, many, other }) => [*one, *few, *many, Some(*other)].into_iter().flatten().collect(),
     }
 }
 

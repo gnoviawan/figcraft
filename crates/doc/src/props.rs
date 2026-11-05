@@ -28,6 +28,8 @@ pub enum StrokeCap {
 }
 
 impl StrokeCap {
+    /// The caps a dash can have.
+    pub const DASH: [StrokeCap; 3] = [StrokeCap::None, StrokeCap::Round, StrokeCap::Square];
     pub const ALL: [StrokeCap; 8] = [
         StrokeCap::None,
         StrokeCap::Round,
@@ -52,6 +54,14 @@ impl StrokeCap {
     }
     pub fn is_arrow(self) -> bool {
         !matches!(self, StrokeCap::None | StrokeCap::Round | StrokeCap::Square)
+    }
+    /// The cap shape this draws on the stroke's band (arrowheads are drawn on top of it).
+    pub fn shape(self) -> StrokeCap {
+        match self {
+            StrokeCap::Round | StrokeCap::CircleFilled => StrokeCap::Round,
+            StrokeCap::Square | StrokeCap::DiamondFilled => StrokeCap::Square,
+            _ => StrokeCap::None,
+        }
     }
 }
 
@@ -82,6 +92,9 @@ pub struct StrokeProps {
     pub miter_limit: f64,
     /// Dash pattern (dash, gap, …); empty = solid.
     pub dashes: Vec<f64>,
+    /// The cap of every dash, both ends (`None`: dashes take `cap_start` and `cap_end`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dash_cap: Option<StrokeCap>,
     /// Variable width: how the width changes along the path (`None` = uniform).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub width_profile: Option<WidthProfile>,
@@ -151,6 +164,7 @@ impl Default for StrokeProps {
             join: StrokeJoin::Miter,
             miter_limit: 4.0,
             dashes: Vec::new(),
+            dash_cap: None,
             width_profile: None,
             brush: None,
         }
@@ -158,6 +172,14 @@ impl Default for StrokeProps {
 }
 
 impl StrokeProps {
+    /// The start and end cap the band is drawn with: a dashed stroke's dash cap when it has one.
+    pub fn band_caps(&self) -> [StrokeCap; 2] {
+        match self.dash_cap.filter(|_| !self.dashes.is_empty()) {
+            Some(c) => [c, c],
+            None => [self.cap_start, self.cap_end],
+        }
+    }
+
     /// The variable width profile, when there is one with points.
     pub fn profile(&self) -> Option<&WidthProfile> {
         self.width_profile.as_ref().filter(|p| !p.points.is_empty())
@@ -869,6 +891,11 @@ impl Effect {
             _ => 0.0,
         }
     }
+    /// Whether this is a visible layer blur or texture: what moves the layer's own pixels, one
+    /// after another in list order.
+    pub fn moves_the_layer(&self) -> bool {
+        self.visible && matches!(self.kind, EffectKind::LayerBlur(_) | EffectKind::Texture(_))
+    }
     /// A layer or background blur's settings.
     pub fn blur(&self) -> Option<&Blur> {
         match &self.kind {
@@ -1337,13 +1364,14 @@ impl ExportSize {
         (value.is_finite() && value > 0.0 && value <= max).then_some(self)
     }
 
-    /// "2x", "512w", "512h".
+    /// "2x", "0.125x", "512w", "512h". Not rounded, so `parse` reads it back as the same size.
     pub fn label(self) -> String {
-        let n = |v: f64| crate::text::trim_num(v);
+        // `{}` prints the shortest text that parses back to the same `f64`, and whole numbers
+        // without a fraction ("2", not "2.0").
         match self {
-            ExportSize::Scale { value } => format!("{}x", n(value)),
-            ExportSize::Width { value } => format!("{}w", n(value)),
-            ExportSize::Height { value } => format!("{}h", n(value)),
+            ExportSize::Scale { value } => format!("{value}x"),
+            ExportSize::Width { value } => format!("{value}w"),
+            ExportSize::Height { value } => format!("{value}h"),
         }
     }
 

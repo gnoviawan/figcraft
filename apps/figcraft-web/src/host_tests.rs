@@ -61,6 +61,35 @@ fn execute_runs_at_once_and_node_ids_beyond_2_pow_53_survive_as_text() {
     assert!(node.contains(&format!(r#""id":{id}"#)), "{node}");
 }
 
+/// `engine.execute {issues, agent, document}`: the call runs as the agent in the named background
+/// tab, answers `{result, issues}`, and leaves the tab in front as it was.
+#[test]
+fn execute_with_issues_runs_as_the_agent_in_the_named_document() {
+    let (mut app, ctx, mut host) = app();
+    let back = app.session.ds().unwrap().uid;
+    app.session.execute("file.new", &json!({})).unwrap();
+    let front = app.session.ds().unwrap().uid;
+    let front_doc = app.session.doc().unwrap().clone();
+    let as_claude = |command: &str, params: Value| json!({"command": command, "params": params, "issues": true, "agent": "Claude", "document": back});
+    let batch = json!({"commands": [
+        {"command": "node.create", "params": {"type": "frame", "name": "Card", "width": 240, "height": 60, "props": {"fill": "#FFFFFF"}}},
+        {"command": "node.create", "params": {"type": "text", "parent": {"$step": 0}, "x": 8, "y": 8, "text": "Faint", "props": {"fill": "#EEEEEE"}}}
+    ]});
+    let reply = ok(&mut host, &mut app, &ctx, "engine.execute", as_claude("command.batch", batch));
+    let keys: Vec<&str> = reply.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["issues", "result"], "{reply}");
+    let faint = reply["result"][1]["id"].clone();
+    assert!(reply["issues"].as_array().unwrap().iter().any(|i| i["id"] == faint && i["kind"] == "low_contrast"), "{reply}");
+    ok(&mut host, &mut app, &ctx, "engine.execute", as_claude("comment.add", json!({"x": 0, "y": 0, "text": "Check the contrast"})));
+    assert_eq!(app.session.ds().unwrap().uid, front, "the tab in front stays in front");
+    assert_eq!(app.session.doc().unwrap(), &front_doc, "the tab in front is unchanged");
+    let back_doc = &app.session.docs.iter().find(|d| d.uid == back).unwrap().doc;
+    assert!(back_doc.contains(figcraft_engine::params::id_of(&faint).unwrap()), "the text is in the named tab");
+    let list = json!({"command": "comment.list", "params": {"filter": "all"}, "document": back});
+    let thread = ok(&mut host, &mut app, &ctx, "engine.execute", list)["comments"][0].clone();
+    assert_eq!((thread["author"].clone(), thread["agent"].clone()), (json!("Claude (agent)"), json!(true)), "{thread}");
+}
+
 #[test]
 fn ui_methods_wait_for_a_frame_and_fail_at_once_while_hidden() {
     let (mut app, ctx, mut host) = app();
@@ -243,7 +272,7 @@ fn termul_light() -> Value {
 }
 
 /// The UI language is one per process: tests that draw frames or switch it take turns.
-static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static LANGUAGE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn frame(ctx: &egui::Context, app: &mut FigApp) {
     let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.ui(ui));
@@ -604,4 +633,65 @@ fn fallback_fonts_draw_what_the_text_font_lacks() {
     assert_eq!(reply["failed"][0], json!({"url": "host-fonts/missing.ttf", "error": "HTTP 404"}));
     assert_eq!(reply["failed"][1], json!({"url": "host-fonts/junk.ttf", "error": "not a font file"}));
     assert_ne!(render(&symbol), noglyph, "{symbol} comes from the fallback font");
+}
+
+fn comment(host: &mut Host, app: &mut FigApp, ctx: &egui::Context, text: &str) {
+    ok(host, app, ctx, "engine.execute", json!({"command": "comment.add", "params": {"x": 0, "y": 0, "text": text, "author": "Ada"}}));
+}
+
+/// `(kind, command)` of each event, and the rest of the reply.
+fn polled(reply: &Value) -> (Vec<(String, String)>, Value) {
+    let events = reply["events"].as_array().unwrap();
+    let texts = events.iter().map(|e| (e["kind"].as_str().unwrap().to_string(), e["data"]["command"].as_str().unwrap().to_string())).collect();
+    (texts, json!({"cursor": reply["cursor"], "reset": reply["reset"], "dropped": reply["dropped"]}))
+}
+
+#[test]
+fn events_poll_on_a_fresh_editor_is_empty_at_cursor_zero() {
+    let (mut app, ctx, mut host) = app();
+    let reply = ok(&mut host, &mut app, &ctx, "events.poll", json!({}));
+    assert_eq!(reply, json!({"events": [], "cursor": 0, "reset": false, "dropped": 0}));
+}
+
+#[test]
+fn events_poll_returns_the_events_after_the_cursor() {
+    let (mut app, ctx, mut host) = app();
+    comment(&mut host, &mut app, &ctx, "first");
+    comment(&mut host, &mut app, &ctx, "second");
+    let all = ok(&mut host, &mut app, &ctx, "events.poll", json!({}));
+    let added = ("comment.added".to_string(), "comment.add".to_string());
+    assert_eq!(polled(&all), (vec![added.clone(), added.clone()], json!({"cursor": 2, "reset": false, "dropped": 0})));
+    let after_first = ok(&mut host, &mut app, &ctx, "events.poll", json!({"after": 1}));
+    assert_eq!(polled(&after_first), (vec![added.clone()], json!({"cursor": 2, "reset": false, "dropped": 0})));
+    let one = ok(&mut host, &mut app, &ctx, "events.poll", json!({"limit": 1}));
+    assert_eq!(polled(&one), (vec![added], json!({"cursor": 1, "reset": false, "dropped": 0})));
+    let caught_up = ok(&mut host, &mut app, &ctx, "events.poll", json!({"after": 2}));
+    assert_eq!(caught_up, json!({"events": [], "cursor": 2, "reset": false, "dropped": 0}));
+    let ahead = ok(&mut host, &mut app, &ctx, "events.poll", json!({"after": 9}));
+    assert_eq!(ahead, json!({"events": [], "cursor": 2, "reset": true, "dropped": 0}), "a cursor from another page load");
+}
+
+#[test]
+fn events_poll_keeps_only_the_topics_asked_for() {
+    let (mut app, ctx, mut host) = app();
+    comment(&mut host, &mut app, &ctx, "hi");
+    let count = |reply: Value| reply["events"].as_array().unwrap().len();
+    assert_eq!(count(ok(&mut host, &mut app, &ctx, "events.poll", json!({"topics": ["document"]}))), 0);
+    assert_eq!(count(ok(&mut host, &mut app, &ctx, "events.poll", json!({"topics": ["comments"]}))), 1);
+    assert_eq!(count(ok(&mut host, &mut app, &ctx, "events.poll", json!({"topics": ["all"]}))), 1);
+    assert_eq!(count(ok(&mut host, &mut app, &ctx, "events.poll", json!({"topics": []}))), 1, "an empty list is all");
+    let err = now(host.call(&mut app, &ctx, "events.poll", r#"{"topics": ["layers"]}"#, false)).unwrap_err();
+    assert_eq!(err, HostError { code: Code::EngineError, message: "unknown topic `layers` (comments, document, all)".into() });
+}
+
+#[test]
+fn events_poll_answers_at_once_while_hidden_and_in_a_kiosk_whatever_the_timeout() {
+    for (mut app, ctx, mut host) in [app(), kiosk_app()] {
+        comment(&mut host, &mut app, &ctx, "hi");
+        let started = std::time::Instant::now();
+        let text = now(host.call(&mut app, &ctx, "events.poll", r#"{"after": 1, "timeoutMs": 20000}"#, true)).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "no wait: {:?}", started.elapsed());
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({"events": [], "cursor": 1, "reset": false, "dropped": 0}));
+        assert!(app.control_queue.is_empty(), "no frame needed");
+    }
 }

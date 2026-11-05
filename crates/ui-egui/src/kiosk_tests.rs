@@ -353,3 +353,35 @@ impl egui::DroppedFile for DroppedBytes {
         Ok(self.0.clone())
     }
 }
+
+fn palette_commands(shell: Shell, query: &str) -> Vec<String> {
+    let mut u = Ui::new(Session::new());
+    u.app.shell = shell;
+    let sections = crate::menus::palette_sections(&u.app, query, crate::menus::PaletteTab::All);
+    sections.iter().flat_map(|(_, rows)| rows).filter_map(|r| r.key.strip_prefix("command:").map(str::to_string)).collect()
+}
+
+#[test]
+fn kiosk_palette_offers_no_online_sharing_publishing_or_joining() {
+    for query in ["publish", "share", "join"] {
+        let full = palette_commands(Shell::Full, query);
+        assert!(full.iter().any(|id| id.starts_with("collab.")), "{query}: the full editor offers it: {full:?}");
+        let kiosk = palette_commands(Shell::Kiosk, query);
+        assert!(!kiosk.iter().any(|id| id.starts_with("collab.")), "{query}: a kiosk offers {kiosk:?}");
+    }
+}
+
+#[test]
+fn kiosk_opens_no_publish_to_server_or_join_dialog() {
+    for shell in [Shell::Kiosk, Shell::Full] {
+        let mut u = ui(shell);
+        crate::menus::invoke(&mut u.app, "collab.publish");
+        crate::menus::invoke(&mut u.app, "collab.join");
+        let opened = (u.app.ui.live.publish.is_some(), u.app.ui.live.join.is_some());
+        assert_eq!(opened, if shell.is_kiosk() { (false, false) } else { (true, true) }, "{shell:?}");
+    }
+    for id in ["collab.publish", "collab.join", "collab.share"] {
+        assert!(Shell::Kiosk.rejects("ui.menu.invoke", &json!({"id": id})), "{id}");
+        assert!(!Shell::Full.rejects("ui.menu.invoke", &json!({"id": id})), "{id} outside kiosk");
+    }
+}
