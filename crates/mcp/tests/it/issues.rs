@@ -332,3 +332,22 @@ fn list_issues_reports_the_whole_page_or_the_given_layers() {
     let ok = c.create(json!({"type": "rectangle", "x": 600, "y": 0, "width": 40, "height": 40}));
     assert_eq!(c.ok("list_issues", json!({"ids": [ok]})), json!({"issues": []}));
 }
+
+/// One call both runs as the attached agent (#1414) and reports issues: the comment it adds is
+/// signed with the agent's name, and the faint text it creates comes back in `issues`.
+#[test]
+fn a_call_with_issues_still_runs_as_the_agent() {
+    let mut c = Client::new();
+    let out = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "params": {"type": "frame", "name": "Card", "width": 240, "height": 60, "props": {"fill": "#FFFFFF"}}},
+            {"command": "node.create", "params": {"type": "text", "parent": {"$step": 0}, "x": 8, "y": 8, "text": "Faint", "props": {"fill": "#EEEEEE"}}},
+            {"command": "comment.add", "params": {"x": 0, "y": 0, "text": "Check the contrast"}},
+        ]}),
+    );
+    let faint = out["results"][1]["id"].clone();
+    assert!(issues(&out).iter().any(|(_, id)| *id == faint), "{out}");
+    let thread = c.run("comment.list", json!({"filter": "all"}))["comments"][0].clone();
+    assert_eq!((thread["author"].clone(), thread["agent"].clone()), (json!("test (agent)"), json!(true)), "{thread}");
+}
