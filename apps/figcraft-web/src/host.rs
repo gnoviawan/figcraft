@@ -87,6 +87,8 @@ enum Route {
     Frame,
     /// `host.fallbackFonts`: the transport fetches the files, then the reply follows.
     Fonts,
+    /// `events.poll`: answered at once from the session's event log.
+    Events,
     Unknown,
 }
 
@@ -96,6 +98,9 @@ fn route(method: &str) -> Route {
     }
     if method == "host.fallbackFonts" {
         return Route::Fonts;
+    }
+    if method == "events.poll" {
+        return Route::Events;
     }
     if let Some((_, m)) = HOST_METHODS.iter().find(|(name, _)| *name == method) {
         return Route::Host(*m);
@@ -215,6 +220,7 @@ impl Host {
             }
             Route::Fonts => return font_urls(&p).map_or_else(|e| Answer::Now(Err(e)), Answer::FetchFonts),
             Route::Engine => figcraft_ui_egui::control::handle(app, ctx, method, &p).map_err(engine_error),
+            Route::Events => events_poll(&app.session, &p),
             Route::Host(m) => self.host(app, ctx, m, &p),
             Route::Unknown => return unknown(),
         };
@@ -336,6 +342,17 @@ impl Host {
             }
         }
     }
+}
+
+/// `events.poll {after?, topics?, limit?}` as the control channel answers it, without waiting:
+/// `timeoutMs` is ignored, because the page's one thread draws the editor and runs its commands, so
+/// nothing could add an event while it waited. A host that wants a long poll asks again.
+fn events_poll(session: &Session, p: &Value) -> Result<Value, HostError> {
+    let after = p.get("after").and_then(Value::as_u64).unwrap_or(0);
+    let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
+    let topics = figcraft_engine::events::topics(p.get("topics")).map_err(engine_error)?;
+    let result = session.events.poll(after, &topics, limit, std::time::Duration::ZERO);
+    serde_json::to_value(result).map_err(|e| engine_error(e.to_string()))
 }
 
 fn optional_text(p: &Value, key: &str) -> Result<Option<String>, HostError> {
