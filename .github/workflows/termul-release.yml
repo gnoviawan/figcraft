@@ -66,9 +66,13 @@ jobs:
           fi
           echo "TAG=$RAW_TAG" >> "$GITHUB_ENV"
 
+      # Upstream builds and releases on stable (craft-common-actions gate.yml, release.yml), and
+      # its code needs more than its declared rust-version 1.95 (`usize::isolate_lowest_one` in
+      # crates/pathops/src/budget.rs). Pin a stable release so a build is reproducible; move it when
+      # an upstream sync needs a newer one.
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
         with:
-          toolchain: "1.95.0"
+          toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
