@@ -170,6 +170,9 @@ pub(crate) fn palette_sections(app: &FigApp, q: &str, tab: PaletteTab) -> Vec<(S
         out.push((tr("Plugins").to_string(), plugin_rows(app, q)));
         out.push((tr("Widgets").to_string(), widget_rows(app, q)));
     }
+    for (_, rows) in &mut out {
+        rows.retain(|r| r.key.strip_prefix("command:").is_none_or(|id| app.shell.offers(id)));
+    }
     out.retain(|(_, rows)| !rows.is_empty());
     out
 }

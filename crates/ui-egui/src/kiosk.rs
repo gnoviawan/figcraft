@@ -17,6 +17,12 @@ fn leaves_the_document(name: &str) -> bool {
     name == "app.quit" || name.starts_with("window.")
 }
 
+/// Commands that share the file online, publish it to a server or join a live session: the host
+/// owns collaboration, so a kiosk offers none of them.
+fn collaborates(name: &str) -> bool {
+    name.starts_with("collab.")
+}
+
 /// Menu items that open a file dialog or save the file where the editor chooses.
 const FILE_MENU_ITEMS: &[&str] = &["file.open", "file.openRecent", "file.import", "file.placeImage", "file.save", "file.saveAs", "plugin.import"];
 
@@ -38,10 +44,15 @@ impl Shell {
         let text = |key: &str| params.get(key).and_then(Value::as_str).unwrap_or_default();
         match method {
             "engine.execute" => leaves_the_document(text("command")),
-            "ui.menu.invoke" => leaves_the_document(text("id")) || FILE_MENU_ITEMS.contains(&text("id")),
+            "ui.menu.invoke" => leaves_the_document(text("id")) || FILE_MENU_ITEMS.contains(&text("id")) || collaborates(text("id")),
             "ui.set" => params.as_object().is_some_and(|p| p.keys().any(|k| k == "mainMenu" || k.starts_with("home"))),
             _ => leaves_the_document(method),
         }
+    }
+
+    /// Whether a menu item, shortcut or Actions palette row for command `id` is offered.
+    pub fn offers(self, id: &str) -> bool {
+        !(self.is_kiosk() && collaborates(id))
     }
 
     /// Whether a UI request raised by a command is dropped instead of acted on.
