@@ -65,7 +65,7 @@ impl Session {
     /// Replace the document with `f(snapshot)` for a live preview during a gesture.
     pub fn preview(&mut self, f: impl FnOnce(&mut Document, &mut Vec<NodeId>) -> Result<()>) -> Result<()> {
         let ds = self.ds_mut()?;
-        let Some(it) = ds.interaction.clone() else { return Err(EngineError::Other("no gesture in progress".into())) };
+        let Some(it) = ds.interaction.clone() else { return Err(EngineError::NoGesture) };
         let mut doc = (*it.doc).clone();
         let mut sel = it.selection.clone();
         // What the gesture changes on the selected layers is an explicit edit.
@@ -114,6 +114,10 @@ impl Session {
 
     pub fn undo(&mut self) -> Result<bool> {
         textpreview::end(self);
+        // While the pen draws, undo works on the anchors of its path (#1745).
+        if self.ds().is_ok_and(|d| d.preview.is_none()) && self.pen_undo()? {
+            return Ok(true);
+        }
         let live = self.ds().is_ok_and(|d| self.live_doc(d.uid));
         let ds = self.ds_mut()?;
         if ds.preview.is_some() {
@@ -152,6 +156,10 @@ impl Session {
 
     pub fn redo(&mut self) -> Result<bool> {
         textpreview::end(self);
+        // While the pen draws, redo works on the anchors of its path (#1745).
+        if self.ds().is_ok_and(|d| d.preview.is_none()) && self.pen_redo()? {
+            return Ok(true);
+        }
         let live = self.ds().is_ok_and(|d| self.live_doc(d.uid));
         let ds = self.ds_mut()?;
         if ds.preview.is_some() {

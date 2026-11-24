@@ -101,6 +101,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_issues",
     "inspect_document",
     "get_node",
+    "design_context",
     "select",
     "export",
     "screenshot",
@@ -123,6 +124,7 @@ const DOCUMENT_TOOLS: &[&str] = &[
     "set_properties",
     "inspect_document",
     "get_node",
+    "design_context",
     "select",
     "export",
     "screenshot",
@@ -209,7 +211,7 @@ fn tools() -> Vec<Value> {
         tool(
             "set_properties",
             "Set properties",
-            "Set properties on one or more layers as one undo step (engine `node.set`). Keys: name, visible, locked, opacity (0-1, or a percentage such as \"80%\"), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), fill (colour) / fills (array of paints: \"#hex\" or {\"type\":\"solid\",\"color\":\"#hex\"} or {\"type\":\"linearGradient\",\"stops\":[\"#hex\",\"#hex\"]} or stops [{\"position\":0..1,\"color\":\"#hex\"}], optional from/to handles in the unit box; radialGradient too), stroke / strokes, strokeWeight, strokeAlign (inside|center|outside), cornerRadius (n or [tl,tr,br,bl]), effects (array, e.g. {\"type\":\"dropShadow\",\"color\":\"#00000040\",\"offset\":[0,4],\"radius\":8}), clip, layout (null|horizontal|vertical|grid), gap, padding (n or [t,r,b,l]), mainAlign (min|center|max|spaceBetween|spaceAround|spaceEvenly), crossAlign, wrap, contentAlign (auto|spaceBetween: wrapped lines), sizingH / sizingV (fixed|hug|fill), constraints {horizontal, vertical}, characters, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textAlign, textAutoResize. Auto layout keys (gap, padding, mainAlign, crossAlign, wrap, …) apply to frames, components and instances only: other layers among the ids are skipped and named in `warnings`, and with none that can take them the call is an error. A fontStyle draws in the family's nearest face, and a family that isn't installed in the default font; `warnings` says so when that face isn't the one named (another family, weight or slant). Run list_commands with filter \"node.set\" for the full list. Unknown keys are an error. An x or y on a layer auto layout places is ignored, with a warning. Returns the updated layers, and `issues` when a layer it touched has a layout problem (see list_issues).",
+            "Set properties on one or more layers as one undo step (engine `node.set`). Keys: name, visible, locked, opacity (0-1, or a percentage such as \"80%\"), blend, x, y (relative to the parent frame; groups don't count), width, height, rotation (degrees), absoluteRotation (degrees on the page), fill (colour) / fills (array of paints: \"#hex\" or {\"type\":\"solid\",\"color\":\"#hex\"} or {\"type\":\"linearGradient\",\"stops\":[\"#hex\",\"#hex\"]} or stops [{\"position\":0..1,\"color\":\"#hex\"}], optional from/to handles in the unit box; radialGradient too), stroke / strokes, strokeWeight, strokeAlign (inside|center|outside), cornerRadius (n or [tl,tr,br,bl]), effects (array, e.g. {\"type\":\"dropShadow\",\"color\":\"#00000040\",\"offset\":[0,4],\"radius\":8}), clip, layout (null|horizontal|vertical|grid), gap, padding (n or [t,r,b,l]), mainAlign (min|center|max|spaceBetween|spaceAround|spaceEvenly), crossAlign, wrap, contentAlign (auto|spaceBetween: wrapped lines), sizingH / sizingV (fixed|hug|fill), constraints {horizontal, vertical}, characters, fontFamily, fontStyle, fontSize, lineHeight, letterSpacing, textAlign, textAutoResize. Auto layout keys (gap, padding, mainAlign, crossAlign, wrap, …) apply to frames, components and instances only: other layers among the ids are skipped and named in `warnings`, and with none that can take them the call is an error. A fontStyle draws in the family's nearest face, and a family that isn't installed in the default font; `warnings` says so when that face isn't the one named (another family, weight or slant). Run list_commands with filter \"node.set\" for the full list. Unknown keys are an error. An x or y on a layer auto layout places is ignored, with a warning. Returns the updated layers, and `issues` when a layer it touched has a layout problem (see list_issues).",
             obj(
                 json!({"ids": ids_schema("Layer ids (default: the selection)"), "props": {"type": "object", "description": "Property values to set"}}),
                 &["props"],
@@ -261,6 +263,22 @@ fn tools() -> Vec<Value> {
             true,
         ),
         tool(
+            "design_context",
+            "Design context",
+            "Everything needed to build a design, in one read: the selection (or `ids`, or `scope`) as a tree where each layer separates `explicit` values the designer set, `derived` ones layout worked out and `unsupported` ones CSS can't say directly, plus the variables, styles, components, fonts and assets it uses and what the design leaves `missing`. Implement connected instances with their `code`, never by rebuilding their layers. Large trees come back with `truncated`: ask again for the parts you need.",
+            obj(
+                json!({
+                    "ids": ids_schema("Layers (default the selection)"),
+                    "scope": {"type": "string", "enum": ["selection", "page", "document"], "description": "What to read without ids (default the selection, or the page when nothing is selected)"},
+                    "depth": int("How deep the tree goes (default 32)"),
+                    "maxNodes": int("Most layers in the tree (default 2000)"),
+                    "maxBytes": int("The largest message your client reads (default 8 MiB): fewer layers come back to fit")
+                }),
+                &[],
+            ),
+            true,
+        ),
+        tool(
             "select",
             "Select layers",
             "Replace the selection with `ids` (switching to their page). An empty array deselects everything. Most commands act on the selection when no `ids` are passed.",
@@ -270,7 +288,7 @@ fn tools() -> Vec<Value> {
         tool(
             "export",
             "Export",
-            "Export layers (default: the selection, else every top-level layer of the current page) as png, jpg, svg, webp, pdf or xml (an Android Vector Drawable, with `warnings` for what it changed or left out, per `vdCompat`) at `scale`, or the whole file as `fig` (experimental: written from public format knowledge, with `warnings` for what was left out; other apps may not open every file) (PDF: with `bleed`, `cropMarks`, `bleedMarks` and `cmyk` for print; options `contentsOnly`, `includeBoundingBox`, and for SVG `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`; for XML `svgIdAttribute` and `vdCompat`). With `path` the file is written there (absolute path recommended) and the result says where. Without `path`: png/jpg/webp come back as an image content block, svg as text (then a JSON text block with `warnings` when a paint, like an angular gradient, went in as an image), xml as text followed by `{format, warnings}`, other formats as base64 `data`.",
+            "Export layers (default: the selection, else every top-level layer of the current page) as png, jpg, svg, webp, pdf or xml (an Android Vector Drawable, with `warnings` for what it changed or left out, per `vdCompat`) at `scale`, or the whole file as `fig` (experimental: written from public format knowledge, with `warnings` for what was left out; other apps may not open every file) (PDF: with `bleed`, `cropMarks`, `bleedMarks` and `cmyk` for print; options `contentsOnly`, `includeBoundingBox`, and for SVG `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`; for XML `svgIdAttribute` and `vdCompat`; for png, jpg and webp `colorProfile`). With `path` the file is written there (absolute path recommended) and the result says where. Without `path`: png/jpg/webp come back as an image content block, svg as text (then a JSON text block with `warnings` when a paint, like an angular gradient, went in as an image), xml as text followed by `{format, warnings}`, other formats as base64 `data`.",
             obj(
                 json!({
                     "ids": ids_schema("Layers to export (several are composited into one image)"),
@@ -288,6 +306,8 @@ fn tools() -> Vec<Value> {
                     "svgIdAttribute": boolean("SVG: layer names as unique `id` attributes (default false)"),
                     "svgSimplifyStroke": boolean("SVG: strokes as `stroke` attributes where exact (default true); false writes outlines"),
                     "vdCompat": {"type": "string", "enum": ["bestEffort", "exact", "ignore"], "description": "XML: what a Vector Drawable can't draw exactly is approximated with a warning (bestEffort, default), left out with a warning (exact), or written as far as it maps without warnings (ignore: overlapping layer opacity dropped, even-odd fills kept as fillType=evenOdd, diamond gradients left out)"},
+                    "colorProfile": {"type": "string", "enum": ["sameAsFile", "srgb", "displayP3"], "description": "PNG, JPG and WebP: the color profile of the file (default sameAsFile: the document's); colors are converted and out-of-gamut ones clip. SVG, XML and RGB PDF output are always sRGB; PDF with cmyk is DeviceCMYK"},
+                    "quality": {"type": "integer", "minimum": 1, "maximum": 100, "description": "JPG: the encoder's quality, 1 (smallest file) to 100; default 90"},
                 }),
                 &[],
             ),
@@ -342,7 +362,7 @@ fn tools() -> Vec<Value> {
                     "y": num("Page y"),
                     "to": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "Drag end [x, y] (page)"},
                     "steps": int("Intermediate move events for drag (default 8)"),
-                    "tool": {"type": "string", "description": "Tool to choose first: move|scale|hand|frame|section|slice|rectangle|line|arrow|ellipse|polygon|star|pen|pencil|text|comment"},
+                    "tool": {"type": "string", "description": "Tool to choose first: move|scale|hand|frame|section|slice|rectangle|line|arrow|ellipse|polygon|star|pen|pencil|text|comment|annotation"},
                     "shift": boolean("Shift held"),
                     "alt": boolean("Alt/Option held"),
                     "cmd": boolean("Cmd (macOS) / Ctrl held"),
@@ -453,6 +473,25 @@ fn with_issues(out: Value, wrap: &str, issues: Vec<Value>) -> Value {
             Value::Object(o)
         }
         other => json!({wrap: other, "issues": issues}),
+    }
+}
+
+/// `inspect.designContext`, with fewer layers until the result fits what the client can read.
+fn design_context(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
+    let (_, budget) = budget(a)?;
+    let mut params = a.clone();
+    params.remove("maxBytes");
+    params.remove("document");
+    loop {
+        let value = exec(b, "inspect.designContext", Value::Object(params.clone()))?;
+        if wire_size(&value) <= budget {
+            return Ok(ToolResult::json(&value));
+        }
+        let layers = value.get("target").and_then(|t| t.get("layers")).and_then(Value::as_u64).unwrap_or(0);
+        if layers <= 1 {
+            return Err(format!("one layer's context is larger than {budget} bytes: call get_node with `fields` instead"));
+        }
+        params.insert("maxNodes".into(), json!(layers / 2));
     }
 }
 
@@ -602,6 +641,7 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         "list_issues" => list_issues(b, &a),
         "inspect_document" => inspect_document(b, &a),
         "get_node" => get_node(b, &a),
+        "design_context" => design_context(b, &a),
         "select" => select(b, &a),
         "export" => export(b, &a),
         "screenshot" => screenshot(b, &a),
@@ -1128,6 +1168,8 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
         "svgIdAttribute",
         "svgSimplifyStroke",
         "vdCompat",
+        "colorProfile",
+        "quality",
     ] {
         if let Some(v) = a.get(k).filter(|v| !v.is_null()) {
             params.insert(k.into(), v.clone());

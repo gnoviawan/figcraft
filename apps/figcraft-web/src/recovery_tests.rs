@@ -88,7 +88,7 @@ fn junk_in_the_storage_opens_nothing() {
 #[test]
 fn the_stopped_page_says_what_was_kept() {
     // In English: the host tests switch the one UI language of the process.
-    let _turn = crate::host_tests::LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _turn = crate::embed_tests::LANGUAGE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let says = |unsaved, kept, what: &str| {
         let text = browser_stopped(unsaved, kept);
         assert!(text.starts_with("FigCraft stopped because of an internal error. ") && text.contains(what), "{text}");

@@ -1,10 +1,10 @@
-# Termul's fork release: builds only the web bundle with the Termul brand and publishes
+# Troupe's fork release: builds only the web bundle with the Troupe brand and publishes
 # figcraft-web-<tag>.zip plus SHA256SUMS.txt to the GitHub release of a `termul-*` tag.
 # Upstream's release.yml (storytold/craft-common-actions) is not used here.
 #
 # Run it by hand (workflow_dispatch) for a dry build: it builds, checks the zip and uploads it as a
 # workflow artifact, and never touches releases.
-name: Termul release
+name: Troupe release
 
 on:
   push:
@@ -29,7 +29,7 @@ env:
   TRUNK_VERSION: "0.21.14"
   WASM_BINDGEN_VERSION: "0.2.129"
   BINARYEN_VERSION: "123"
-  FIGCRAFT_BRAND_NAME: "Termul Canvas"
+  FIGCRAFT_BRAND_NAME: "Troupe Canvas"
   # Same pin as release.yml and ci.yml. It must be a commit with fonts/latin-manifest.txt (Inter):
   # the wasm build embeds nothing without Inter and text then has no width.
   CRAFT_FONTS_REF: "37827adc41fd165f9a9234ac40f94dbad353aa69"
@@ -43,12 +43,12 @@ jobs:
     env:
       CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out craft-fonts at the pinned commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           repository: storytold/craft-fonts
           ref: ${{ env.CRAFT_FONTS_REF }}
@@ -70,12 +70,12 @@ jobs:
       # its code needs more than its declared rust-version 1.95 (`usize::isolate_lowest_one` in
       # crates/pathops/src/budget.rs). Pin a stable release so a build is reproducible; move it when
       # an upstream sync needs a newer one.
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: termul-web
           cache-on-failure: true
@@ -111,15 +111,15 @@ jobs:
           wasm-bindgen --version
           wasm-opt --version
 
-      - name: Build the web bundle, enforce the 24.5 MiB wasm gate and zip
+      - name: Build the web bundle, enforce the 30 MiB wasm gate and zip
         env:
           DIST: ${{ runner.temp }}/release
-          # package.sh keeps a .wasm under 24 MiB for Cloudflare's 25 MiB per-file cap. This bundle
-          # never goes to Cloudflare: Termul downloads it from this repository's GitHub release,
-          # embeds it in its own binary and serves it from its own server (termul
-          # src-tauri/build.rs, src-tauri/src/canvas/static_server.rs). 24.5 MiB keeps the gate as a
-          # check on growth, below that cap.
-          FIGCRAFT_WASM_MAX_BYTES: "25690112"
+          # package.sh keeps a .wasm under Cloudflare's 25 MiB per-file cap. This bundle never goes to
+          # Cloudflare: Troupe downloads it from this repository's GitHub release, embeds it in its
+          # own binary and serves it from its own server (src-tauri/build.rs,
+          # src-tauri/src/canvas/static_server.rs). Upstream main's own wasm passed 25 MiB with the
+          # craft-libs move (28,089,246 bytes at c01d391d); 30 MiB keeps the gate as a check on growth.
+          FIGCRAFT_WASM_MAX_BYTES: "31457280"
         run: |
           set -euo pipefail
           export FIGCRAFT_VERSION="$TAG" FIGCRAFT_HOST_TAG="$TAG"
@@ -146,9 +146,8 @@ jobs:
             || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not the <title> of index.html"; exit 1; }
           unzip -p "$zip" "$root/index.html" | grep -F "Loading $FIGCRAFT_BRAND_NAME&hellip;" >/dev/null \
             || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not in the loading text of index.html"; exit 1; }
-          # Inter's name table is UTF-16BE, so this only matches font bytes, not a "Inter" string literal.
-          unzip -p "$zip" "$wasm" | LC_ALL=C grep -aP '\x00I\x00n\x00t\x00e\x00r\x00 \x00P\x00r\x00o\x00j\x00e\x00c\x00t' >/dev/null \
-            || { echo "::error::craft-fonts (Inter) is not embedded in the wasm; text would have no width"; exit 1; }
+          # Inter itself is not grepped: web builds embed fonts zlib-packed, and CRAFT_FONTS_REQUIRED
+          # makes crates/text/build.rs fail the build when Inter Regular or SemiBold is missing.
           grep -qx "$root/OFL-inter.txt" <<<"$entries" \
             || { echo "::error::$root/OFL-inter.txt missing; the OFL requires the licence to travel with the font"; exit 1; }
           echo "$entries"
@@ -162,7 +161,7 @@ jobs:
           sha256sum "figcraft-web-$TAG.zip" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: termul-web-release
           path: |
@@ -184,7 +183,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: termul-web-release
           path: release
@@ -194,6 +193,6 @@ jobs:
           set -euo pipefail
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --title "$TAG" \
-              --notes "Termul Canvas web bundle built from $GITHUB_SHA."
+              --notes "Troupe Canvas web bundle built from $GITHUB_SHA."
           fi
           gh release upload "$TAG" "release/figcraft-web-$TAG.zip" release/SHA256SUMS.txt --clobber

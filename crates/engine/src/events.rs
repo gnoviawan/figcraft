@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
-// `web_time`: std clocks panic in the browser build (wasm32-unknown-unknown).
+// The browser build has no `std` clock: `std::time::SystemTime::now()` panics on
+// wasm32-unknown-unknown ("time not implemented on this platform"), and every `comment.*` command
+// stamps an event. `web_time` is `std::time` on native targets and the JavaScript clock on wasm.
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Most events kept; the oldest are dropped.

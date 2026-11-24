@@ -17,7 +17,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast as _, JsValue};
 use wasm_bindgen_futures::JsFuture;
 
-use crate::host::{Answer, Code, Host, HostError};
+use crate::embed::{Answer, Code, Host, HostError};
 
 /// The page embedding the editor.
 #[derive(Clone)]
@@ -145,7 +145,7 @@ impl Embed {
             Answer::FetchFonts(urls) => {
                 let (link, ctx) = (self.link.clone(), ctx.clone());
                 wasm_bindgen_futures::spawn_local(async move {
-                    let result = crate::host::add_fallback_fonts(fetch_all(urls).await);
+                    let result = crate::embed::add_fallback_fonts(fetch_all(urls).await);
                     ctx.request_repaint();
                     link.reply(&id, &mount_seq, Ok(result));
                 });

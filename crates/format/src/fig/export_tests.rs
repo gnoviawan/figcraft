@@ -812,6 +812,21 @@ fn generated_documents_round_trip() {
 }
 
 #[test]
+fn a_boolean_groups_corner_radius_round_trips() {
+    let mut doc = Document::new("t");
+    let page = doc.first_page().unwrap();
+    let g = doc.create(page, NodeKind::BooleanOp { op: BoolOp::Union }, "G", 0.0, 0.0, 0.0, 0.0).unwrap();
+    doc.create(g, NodeKind::Rectangle, "A", 0.0, 0.0, 200.0, 100.0).unwrap();
+    doc.create(g, NodeKind::Rectangle, "B", 150.0, 0.0, 100.0, 200.0).unwrap();
+    doc.fit_to_children(g).unwrap();
+    doc.get_mut(g).unwrap().corners = Corners { radii: [20.0; 4], smoothing: 0.6 };
+    let (back, _) = round_trip(&doc, "boolean radius");
+    let n = back.nodes().find(|n| matches!(n.kind, NodeKind::BooleanOp { .. })).unwrap();
+    assert!(n.corners.radii.iter().all(|r| (r - 20.0).abs() < 1e-4), "{:?}", n.corners);
+    assert!((n.corners.smoothing - 0.6).abs() < 1e-4, "{:?}", n.corners);
+}
+
+#[test]
 fn round_trip_keeps_the_details() {
     let doc = generate(3);
     let (back, warnings) = round_trip(&doc, "seed 3");
@@ -828,21 +843,38 @@ fn round_trip_keeps_the_details() {
 }
 
 #[test]
-fn fig_export_warns_when_region_paints_are_left_out() {
-    let mut doc = generate(3);
-    let Some(id) = doc.nodes().find_map(|node| match &node.kind {
-        NodeKind::Vector { network } if !network.regions.is_empty() => Some(node.id),
-        _ => None,
-    }) else {
-        panic!("generated document has no filled vector");
-    };
-    let node = doc.node_mut(id).unwrap();
-    let NodeKind::Vector { network } = &mut node.kind else { panic!("expected vector fixture") };
-    let region = network.regions.first_mut().unwrap();
-    region.fills = Some(Vec::new());
+fn vector_region_paints_round_trip() {
+    let square = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)].map(|(x, y)| Point::new(x, y));
+    let mut doc = Document::new("regions");
+    let page = doc.first_page().unwrap();
+    let mut two = VectorNetwork::from_points(&square, true);
+    let again = two.regions[0].clone();
+    two.regions.push(again);
+    let mut half = Paint::solid(Color { r: 0.25, g: 0.5, b: 0.75, a: 1.0 });
+    half.opacity = 0.5;
+    let gradient = Paint::gradient(Gradient::default_for(GradientKind::Linear, Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }));
+    two.regions[0].fills = Some(vec![half, gradient]);
+    two.regions[1].fills = Some(Vec::new());
+    let id = doc.create(page, NodeKind::Vector { network: two }, "Painted", 0.0, 0.0, 100.0, 100.0).unwrap();
+    doc.node_mut(id).unwrap().fills = vec![Paint::solid(Color::BLACK)];
+    let inherit = VectorNetwork::from_points(&square, true);
+    let id2 = doc.create(page, NodeKind::Vector { network: inherit }, "Inherits", 0.0, 0.0, 100.0, 100.0).unwrap();
+    doc.node_mut(id2).unwrap().fills = vec![Paint::solid(Color::BLACK)];
 
-    let (_, warnings) = export(&doc, None).unwrap();
-    assert!(warnings.iter().any(|warning| warning == "vector region paints were left out of the .fig export"), "{warnings:?}");
+    let (back, warnings) = round_trip(&doc, "region paints");
+    assert!(!warnings.iter().any(|w| w.contains("region")), "{warnings:?}");
+    let regions_of = |d: &Document, name: &str| match d.nodes().find(|n| n.name == name).map(|n| &n.kind) {
+        Some(NodeKind::Vector { network }) => network.regions.clone(),
+        k => panic!("{name}: {k:?}"),
+    };
+    let painted = regions_of(&back, "Painted");
+    assert_eq!(painted.len(), 2);
+    let fills = painted[0].fills.as_ref().expect("the first region keeps its paints");
+    assert_eq!(fills.len(), 2);
+    assert!(matches!(&fills[0].kind, PaintKind::Solid { .. }) && (fills[0].opacity - 0.5).abs() < 1e-6);
+    assert!(matches!(&fills[1].kind, PaintKind::Gradient(_)));
+    assert_eq!(painted[1].fills, Some(Vec::new()), "an unfilled region stays unfilled");
+    assert_eq!(regions_of(&back, "Inherits")[0].fills, None, "a region with no paints of its own still shows the layer's");
 }
 
 #[test]
@@ -860,16 +892,18 @@ fn fig_export_warns_when_inherited_region_paints_have_a_paint_frame() {
     let region = network.regions.first_mut().unwrap();
     region.fills = None;
     region.paint_space = Some(RegionPaintSpace { width: 20.0, height: 10.0, transform: Affine::translate((4.0, 8.0)) });
+    let text = "vector region paint frames were left out (their gradients and images follow the layer's box)";
 
     let (_, warnings) = export(&doc, None).unwrap();
-    assert!(warnings.iter().any(|warning| warning == "vector region paints were left out of the .fig export"), "{warnings:?}");
+    assert!(warnings.iter().any(|warning| warning == text), "{warnings:?}");
 
     let mut plain = doc;
     let node = plain.node_mut(id).unwrap();
     let NodeKind::Vector { network } = &mut node.kind else { panic!("expected vector fixture") };
     network.regions[0].paint_space = None;
+    network.regions[0].fills = Some(vec![Paint::solid(Color::BLACK)]);
     let (_, warnings) = export(&plain, None).unwrap();
-    assert!(!warnings.iter().any(|warning| warning == "vector region paints were left out of the .fig export"), "{warnings:?}");
+    assert!(!warnings.iter().any(|warning| warning.contains("region paint")), "{warnings:?}");
 }
 
 #[test]
@@ -910,6 +944,68 @@ fn written_files_decode_and_list_parents_first() {
         let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes[..])).unwrap();
         assert!(crate::read_member(&mut z, "thumbnail.png", 1 << 20).is_ok());
     }
+}
+
+#[test]
+fn closed_vector_geometry_is_written_with_its_corner_smoothing() {
+    // A closed vector with rounded points: its written fill and stroke outlines take the layer's
+    // corner smoothing, and the smoothing and each point's radius come back on import.
+    let mut doc = Document::new("smoothing");
+    let page = doc.first_page().unwrap();
+    let mut network = VectorNetwork::from_points(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)].map(|(x, y)| Point::new(x, y)), true);
+    for (v, r) in network.vertices.iter_mut().zip([20.0, 0.0, 10.0, 0.0]) {
+        v.radius = r;
+    }
+    let id = doc.create(page, NodeKind::Vector { network }, "V", 0.0, 0.0, 100.0, 100.0).unwrap();
+    doc.node_mut(id).unwrap().strokes = vec![Paint::solid(Color::BLACK)];
+    // The vector's written fill and stroke outlines.
+    let outlines = |doc: &Document| -> Vec<Vec<u8>> {
+        let (bytes, _) = export(doc, None).unwrap();
+        let archive = Archive::open(&bytes).unwrap();
+        let (schema, message) = decode_canvas(&archive.canvas).unwrap();
+        let msg = schema.decode_message(schema.find("Message").unwrap(), &message).unwrap();
+        let blobs = msg.get("blobs").unwrap().list();
+        let changes = msg.get("nodeChanges").unwrap().list();
+        let nc = changes.iter().find(|nc| nc.get("type").and_then(Kv::str) == Some("VECTOR")).unwrap();
+        ["fillGeometry", "strokeGeometry"]
+            .iter()
+            .map(|key| {
+                let paths = nc.get(key).map(Kv::list).unwrap_or_default();
+                let blob = paths.first().unwrap_or_else(|| panic!("{key} is written")).get("commandsBlob").unwrap().f64().unwrap() as usize;
+                blobs[blob].get("bytes").and_then(Kv::bytes).unwrap().to_vec()
+            })
+            .collect()
+    };
+    let plain = outlines(&doc);
+    doc.node_mut(id).unwrap().corners.smoothing = 0.6;
+    let smoothed = outlines(&doc);
+    assert_ne!(smoothed[0], plain[0], "the fill outline takes the smoothing");
+    assert_ne!(smoothed[1], plain[1], "the stroke outline takes the smoothing");
+    let (back, _) = round_trip(&doc, "smoothed vector");
+    let v = back.nodes().find(|n| matches!(n.kind, NodeKind::Vector { .. })).unwrap();
+    assert!((v.corners.smoothing - 0.6).abs() < 1e-6, "smoothing comes back: {}", v.corners.smoothing);
+    let NodeKind::Vector { network } = &v.kind else { panic!("vector") };
+    let radii: Vec<f64> = network.vertices.iter().map(|x| x.radius).collect();
+    assert_eq!(radii, vec![20.0, 0.0, 10.0, 0.0], "each point keeps its own radius");
+}
+
+#[test]
+fn sharp_points_on_a_rounded_vector_stay_sharp() {
+    // A point without a radius takes the layer's when read, so a sharp point on a vector with a
+    // layer radius is written with its own zero.
+    let mut doc = Document::new("sharp point");
+    let page = doc.first_page().unwrap();
+    let mut network = VectorNetwork::from_points(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)].map(|(x, y)| Point::new(x, y)), true);
+    for (v, r) in network.vertices.iter_mut().zip([8.0, 0.0, 8.0, 0.0]) {
+        v.radius = r;
+    }
+    let id = doc.create(page, NodeKind::Vector { network }, "V", 0.0, 0.0, 100.0, 100.0).unwrap();
+    doc.node_mut(id).unwrap().corners.radii = [8.0; 4];
+    let (back, _) = round_trip(&doc, "sharp point");
+    let v = back.nodes().find(|n| matches!(n.kind, NodeKind::Vector { .. })).unwrap();
+    let NodeKind::Vector { network } = &v.kind else { panic!("vector") };
+    let radii: Vec<f64> = network.vertices.iter().map(|x| x.radius).collect();
+    assert_eq!(radii, vec![8.0, 0.0, 8.0, 0.0]);
 }
 
 #[test]
@@ -1240,6 +1336,25 @@ fn local_samples_round_trip() {
             }
         }
         assert_same(&a, &b, &format!("{} (export warnings: {warnings:?})", p.display()));
+    }
+}
+
+#[test]
+fn a_glass_frost_is_written_as_it_draws() {
+    // A frost saved before the 0–100 range (or not a number) is written at what it draws: 100, or
+    // the default.
+    for (frost, written) in [(12.0, 12.0), (500.0, Glass::MAX_FROST), (f64::NAN, Glass::default().frost)] {
+        let mut doc = Document::new("glass");
+        let page = doc.first_page().unwrap();
+        let r = doc.create(page, NodeKind::Rectangle, "Pane", 0.0, 0.0, 24.0, 24.0).unwrap();
+        doc.get_mut(r).unwrap().effects = vec![Effect { kind: EffectKind::Glass(Glass { frost, ..Glass::default() }), visible: true }];
+        let (bytes, _) = export(&doc, None).unwrap();
+        let archive = Archive::open(&bytes).unwrap();
+        let (schema, message) = decode_canvas(&archive.canvas).unwrap();
+        let msg = schema.decode_message(schema.find("Message").unwrap(), &message).unwrap();
+        let pane = msg.get("nodeChanges").unwrap().list().iter().find(|nc| nc.get("name").and_then(Kv::str) == Some("Pane")).unwrap();
+        let radius = pane.get("effects").unwrap().list()[0].get("radius").and_then(Kv::f64).unwrap();
+        assert_eq!(radius, written, "frost {frost}");
     }
 }
 
@@ -1610,6 +1725,22 @@ fn a_whole_ellipse_starting_anywhere_comes_back_whole() {
             assert!(matches!(kinds.as_slice(), [NodeKind::Ellipse { sweep: s, .. }] if *s == sweep), "start {start}, sweep {sweep}: {kinds:?}");
         }
     }
+}
+
+#[test]
+fn text_with_thousands_of_distinct_styles_exports_in_linear_time() {
+    // The style table used to be searched end to end for every span (quadratic in distinct styles).
+    let mut doc = Document::new("styles");
+    let p = doc.first_page().unwrap();
+    let mut td = TextData::new("x".repeat(20_000));
+    td.runs = (0..20_000)
+        .map(|i| StyleRun { start: i, end: i + 1, style: TextStyle { font_size: 8.0 + i as f64 / 100.0, ..TextStyle::default() } })
+        .collect();
+    doc.create(p, NodeKind::Text(td), "T", 0.0, 0.0, 100.0, 100.0).unwrap();
+    let start = std::time::Instant::now();
+    let (bytes, _) = export(&doc, None).unwrap();
+    assert!(!bytes.is_empty());
+    assert!(start.elapsed() < std::time::Duration::from_secs(10), "{:?}", start.elapsed());
 }
 
 /// An ellipse whose start has gone round many times (a start typed in degrees past a few hundred

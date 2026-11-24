@@ -190,6 +190,7 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
         || u.import_report.is_some()
         || u.missing_fonts.is_some()
         || u.confirm_close
+        || matches!(u.close_tab, Some(crate::windows::TabClose::Ask(_)))
         || u.export_preview
         || u.shortcuts_panel
         || u.preferences
@@ -204,6 +205,10 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
         || u.import_report.take().is_some()
         || u.missing_fonts.take().is_some()
     {
+        return;
+    }
+    if matches!(u.close_tab, Some(crate::windows::TabClose::Ask(_))) {
+        u.close_tab = None;
         return;
     }
     for flag in [&mut u.confirm_close, &mut u.export_preview, &mut u.shortcuts_panel, &mut u.preferences, &mut u.about] {
@@ -253,6 +258,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
                 (tr("Show dimensions on objects"), prefs.show_dimensions, "pref.showDimensions"),
                 (tr("Use number keys for opacity"), prefs.number_keys_opacity, "pref.numberKeysOpacity"),
                 (tr("Scroll wheel zoom"), prefs.scroll_wheel_zoom, "pref.scrollWheelZoom"),
+                (tr("Invert zoom direction"), prefs.invert_zoom, "pref.invertZoom"),
                 (tr("Reduce motion"), prefs.reduce_motion, "pref.reduceMotion"),
             ] {
                 if crate::widgets::checkbox(ui, val, label) {
@@ -421,6 +427,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     crate::live::publish_dialog(app, ctx);
     crate::online::dialogs(app, ctx);
     crate::windows::confirm_close(app, ctx);
+    crate::windows::confirm_close_tab(app, ctx);
 }
 
 /// Preferences ▸ Interface size: a size relative to the system's display scale (100 % is the

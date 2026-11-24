@@ -290,7 +290,7 @@ fn a_selected_connector_shows_its_ends_as_handles() {
     let b = u.app.session.execute("board.sticky", &json!({"x": 400, "y": 0})).unwrap()["id"].clone();
     u.app.session.execute("board.connector", &json!({"from": a, "to": b, "style": "straight"})).unwrap();
     let shapes = flat(&u.frame_output(vec![]).shapes);
-    let ends = [u.app.to_screen(200.0, 100.0), u.app.to_screen(400.0, 100.0)];
+    let ends = [u.app.to_screen(204.0, 100.0), u.app.to_screen(396.0, 100.0)];
     for end in ends {
         let ring = shapes.iter().any(|s| matches!(s, egui::Shape::Circle(c) if (c.center - end).length() < 0.5 && c.radius == 5.0));
         assert!(ring, "a handle at {end:?}");
@@ -397,4 +397,30 @@ fn cmd_while_moving_a_connector_end_places_it_on_the_object() {
     u.frame(vec![]);
     drag(&mut u, Modifiers::NONE);
     assert!(matches!(end(&u), figcraft_doc::End::Node { at: None, side: figcraft_doc::Side::Right, .. }), "{:?}", end(&u));
+}
+
+#[test]
+fn a_selected_sticky_has_a_size_menu_instead_of_the_size_cells() {
+    let mut u = board();
+    let r = u.app.session.execute("board.sticky", &json!({"x": 0, "y": 0, "text": "Alpha"})).unwrap();
+    let note = figcraft_engine::board::text_of(u.app.session.doc().unwrap(), id(&r)).unwrap();
+    u.frame(vec![]);
+    u.frame(vec![]);
+    let shapes = flat(&u.frame_output(vec![]).shapes);
+    assert!(has_text(&shapes, "Small"), "the menu reads Small");
+    assert!(!has_text(&shapes, "XL"), "no S/M/L/XL cells");
+    // The menu sits after the 8 colours (208 from the bar's left edge).
+    let b = bar(&u).expect("the bar shows");
+    click(&mut u, pos2(b.min.x + 208.0 + 40.0, b.center().y));
+    let shapes = flat(&u.frame_output(vec![]).shapes);
+    // Each row is padded to line up with the check mark on the current one.
+    for name in ["✓ Small", "    Medium", "    Large", "    Extra large", "    Huge"] {
+        assert!(has_text(&shapes, name), "{name:?} in the menu");
+    }
+    click(&mut u, text_center(&shapes, "    Large"));
+    let size = |u: &Ui| u.app.session.doc().unwrap().node(note).unwrap().kind.text().unwrap().style.font_size;
+    assert_eq!(size(&u), 40.0);
+    u.frame(vec![]);
+    let shapes = flat(&u.frame_output(vec![]).shapes);
+    assert!(has_text(&shapes, "Large") && !has_text(&shapes, "Small"), "the menu reads Large");
 }
