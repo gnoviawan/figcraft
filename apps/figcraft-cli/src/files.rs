@@ -10,6 +10,12 @@ use serde_json::{Value, json};
 
 use crate::{CliError, CliResult};
 
+/// A document's or plugin's text as a terminal should show it: control characters escaped, and
+/// everything else (quotes, backslashes in paths) left as it is.
+pub(crate) fn plain(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { c.escape_default().to_string() } else { c.to_string() }).collect()
+}
+
 pub fn load(path: &str) -> CliResult<Document> {
     let (doc, notes) = load_noted(path)?;
     if ext(path) == "penpot" {
@@ -204,26 +210,33 @@ pub fn info(path: &str, as_json: bool) -> CliResult<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     for n in &notes {
-        eprintln!("note: {n}");
+        eprintln!("note: {}", plain(&n.to_string()));
     }
     println!(
         "{} — {} ({} nodes, {} styles, {} variables, {} images)",
-        path,
-        doc.name,
+        plain(path),
+        plain(&doc.name),
         doc.node_count(),
         doc.styles.len(),
         doc.variables.variables.len(),
         doc.images.len()
     );
     for p in &pages {
-        println!("page {} \"{}\": {} nodes, {} top-level", p["id"], p["name"].as_str().unwrap_or(""), p["nodes"], p["topLevel"]);
+        println!("page {} \"{}\": {} nodes, {} top-level", p["id"], plain(p["name"].as_str().unwrap_or("")), p["nodes"], p["topLevel"]);
         for f in p["frames"].as_array().into_iter().flatten() {
-            println!("  {} {} \"{}\" {}×{}", f["id"], f["type"].as_str().unwrap_or(""), f["name"].as_str().unwrap_or(""), f["width"], f["height"]);
+            println!(
+                "  {} {} \"{}\" {}×{}",
+                f["id"],
+                f["type"].as_str().unwrap_or(""),
+                plain(f["name"].as_str().unwrap_or("")),
+                f["width"],
+                f["height"]
+            );
         }
     }
     for m in &missing {
         let layers = if m.layers == 1 { "text layer" } else { "text layers" };
-        println!("missing font \"{}\": {} {layers} (drawn in a fallback font)", m.family, m.layers);
+        println!("missing font \"{}\": {} {layers} (drawn in a fallback font)", plain(&m.family), m.layers);
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -234,7 +247,10 @@ pub fn info(path: &str, as_json: bool) -> CliResult<ExitCode> {
 fn sanitize(name: &str) -> String {
     let s = figcraft_engine::cmd::file::safe_file_name(name);
     let s = s.trim_matches(|c: char| c == '.' || c.is_whitespace());
-    if s.is_empty() { "layer".into() } else { s.char_indices().take(100).take_while(|(i, c)| i + c.len_utf8() <= 200).map(|(_, c)| c).collect() }
+    let cap = |s: &str| s.char_indices().take(100).take_while(|(i, c)| i + c.len_utf8() <= 200).map(|(_, c)| c).collect::<String>();
+    // Truncation can expose a device name; its escape must still fit the limits.
+    let s = figcraft_engine::file_access::escape_device_names(&cap(s));
+    if s.is_empty() { "layer".into() } else { cap(&s) }
 }
 
 /// What `export` exports and how.
@@ -447,8 +463,8 @@ pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliRe
             line["as"] = json!(name);
         }
         println!("{line}");
-        // The error starts with the step's label.
-        eprintln!("error: {e}");
+        // Plugin-supplied text: escape terminal controls and line breaks. The error starts with the step's label.
+        eprintln!("error: {}", plain(&e.to_string()));
         eprintln!("the script's document changes were rolled back");
         return Ok(ExitCode::from(1));
     }
@@ -464,7 +480,7 @@ pub fn run_script(script: &str, input: Option<&str>, out: Option<&str>) -> CliRe
         refuse_dropping_images_from_script(input.map(|input| (input, input_images_left_out)), ds, out)?;
         if ext(out) == "figcraft" {
             // Through the engine, so the version history is kept.
-            write(out, &figcraft_engine::cmd::file::file_bytes(ds).map_err(|e| CliError::Failed(e.to_string()))?)?;
+            write(out, &figcraft_engine::cmd::file::file_bytes_at(ds, out).map_err(|e| CliError::Failed(e.to_string()))?)?;
         } else {
             write_doc(&ds.doc, ds.page, out)?;
         }
@@ -505,6 +521,25 @@ pub fn connect_publish(file: &str, mappings: &str, dry_run: bool) -> CliResult<E
 mod tests {
     use super::*;
 
+    /// `info` and a script's failure print what a file and its steps name, controls escaped.
+    #[test]
+    fn info_and_a_failed_script_print_what_they_were_given() {
+        let dir = std::env::temp_dir().join(format!("figcraft-cli-plain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (svg, script) = (dir.join("a.svg"), dir.join("s.json"));
+        std::fs::write(&svg, r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>"#).unwrap();
+        std::fs::write(&script, r#"[{"command":"no.such\u001b"}]"#).unwrap();
+        assert_eq!(info(svg.to_str().unwrap(), false).unwrap(), ExitCode::SUCCESS);
+        assert_eq!(run_script(script.to_str().unwrap(), None, None).unwrap(), ExitCode::from(1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plain_escapes_controls_and_leaves_quotes_and_paths() {
+        assert_eq!(plain("a\u{1b}[31m\nb"), r"a\u{1b}[31m\nb");
+        assert_eq!(plain(r"Bob's C:\files"), r"Bob's C:\files");
+    }
+
     #[test]
     fn script_formats() {
         assert_eq!(parse_script(r#"[{"command":"a"},{"command":"b","params":{"x":1}}]"#).unwrap().len(), 2);
@@ -524,6 +559,10 @@ mod tests {
         assert_eq!(sanitize("Home / Hero"), "Home _ Hero");
         assert_eq!(sanitize("../.."), "_");
         assert_eq!(sanitize(""), "layer");
+        assert_eq!(sanitize("CON"), "_CON");
+        assert_eq!(sanitize(" .nul.txt. "), "_nul.txt");
+        assert_eq!(sanitize("COM1"), "_COM1");
+        assert_eq!(sanitize("HomeCON"), "HomeCON");
         // The same characters the app's export keeps (#1154): only what file systems refuse goes.
         assert_eq!(sanitize("Homepage - desktop (live + verbeteringen)"), "Homepage - desktop (live + verbeteringen)");
         assert_eq!(sanitize("Q&A, 50% #1 [v2] {x} ~é"), "Q&A, 50% #1 [v2] {x} ~é");
@@ -532,6 +571,16 @@ mod tests {
         assert_eq!(sanitize(" . .name. . "), "name", "spaces and dots at the edges, mixed");
         assert_eq!(sanitize(&"x".repeat(300)).chars().count(), 100);
         assert_eq!(sanitize(&"\u{1F600}".repeat(100)), "\u{1F600}".repeat(50), "at most 200 bytes, whole characters");
+    }
+
+    #[test]
+    fn sanitizes_names_that_become_devices_at_the_character_limit() {
+        assert_eq!(sanitize(&format!("CON{}X", " ".repeat(97))), format!("_CON{}", " ".repeat(96)));
+    }
+
+    #[test]
+    fn sanitizes_names_that_become_devices_at_the_byte_limit() {
+        assert_eq!(sanitize(&format!("NUL{}  X", "\u{2003}".repeat(65))), format!("_NUL{} ", "\u{2003}".repeat(65)));
     }
 
     #[test]
@@ -651,7 +700,7 @@ mod tests {
         )
         .unwrap();
         let out = dir.join("out.figcraft");
-        run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap();
+        assert_eq!(run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap(), ExitCode::SUCCESS);
 
         let mut s = Session::empty();
         s.execute("file.open", &json!({"path": out.to_str().unwrap()})).unwrap();
@@ -681,7 +730,7 @@ mod tests {
         )
         .unwrap();
         let out = dir.join("out.figcraft");
-        run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap();
+        assert_eq!(run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap(), ExitCode::SUCCESS);
 
         let mut s = Session::empty();
         s.execute("file.open", &json!({"path": out.to_str().unwrap()})).unwrap();
@@ -718,7 +767,7 @@ mod tests {
         .unwrap();
         let out = dir.join("out.figcraft");
         // The failure is the script's, not the call's: the CLI reports it and exits non-zero.
-        run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap();
+        assert_eq!(run_script(script.to_str().unwrap(), None, Some(out.to_str().unwrap())).unwrap(), ExitCode::from(1));
         assert!(!out.exists(), "a script that failed writes nothing");
         std::fs::remove_dir_all(dir).unwrap();
     }

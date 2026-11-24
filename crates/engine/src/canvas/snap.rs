@@ -4,12 +4,12 @@
 //! guide lines (with spacing labels) for the canvas to draw in red. Vector points also snap to
 //! other points (see `vectoredit::snap`); landing on one shows a marker (a zero-length guide).
 
-use figcraft_doc::{Document, NodeId};
+use figcraft_doc::{BoardItem, Document, NodeId};
 use figcraft_geom::{Affine, Point, Rect, Vec2, transform_rect_bbox};
 use serde::Serialize;
 
 use crate::guides;
-use crate::tools::SNAP_PX;
+use crate::tools::UNMEASURED_SNAP_PX;
 
 /// A guide line to draw: from (x0, y0) to (x1, y1) in page coordinates, with an optional label
 /// (a distance) at its middle; `dashed` marks a measurement's extension line.
@@ -94,10 +94,23 @@ impl Targets {
                 t.ys.push((y, b.x0, b.x1));
             }
         }
-        // Siblings and, at the top level, all top-level layers.
+        // Siblings and, at the top level, all top-level layers. A board connector joined to a
+        // moving layer, or to one inside it (a section carries its stickies), re-routes with it, as
+        // does its label: no snapping to where its own route starts (#1916).
+        let carried = |e: NodeId| moving.contains(&e) || doc.ancestors(e).iter().any(|a| moving.contains(a));
+        let follows = |id: NodeId| match doc.node(id).and_then(|n| n.board.as_ref()) {
+            Some(BoardItem::Connector(k)) => [k.from.node(), k.to.node()].into_iter().flatten().any(carried),
+            _ => false,
+        };
         if let Some(p) = doc.node(parent) {
             for c in &p.children {
-                if moving.contains(c) || !doc.node(*c).is_some_and(|n| n.visible) {
+                let Some(n) = doc.node(*c).filter(|n| n.visible) else { continue };
+                let joined = match n.board.as_ref() {
+                    Some(BoardItem::Connector(_)) => follows(*c),
+                    Some(BoardItem::Label { connector }) => follows(*connector),
+                    _ => false,
+                };
+                if moving.contains(c) || joined {
                     continue;
                 }
                 if let Some(b) = bbox(*c) {
@@ -425,14 +438,14 @@ impl Targets {
 }
 
 /// Snap a guide on `owner` (a page or a top-level frame) to the nearest layer edge or centre along
-/// its own axis, within `SNAP_PX` screen pixels at `zoom`. Returns the new offset in `owner`'s
+/// its own axis, within `UNMEASURED_SNAP_PX` screen pixels at `zoom`. Returns the new offset in `owner`'s
 /// coordinates, or `None` when nothing is in reach.
 pub fn snap_guide(doc: &Document, page: NodeId, owner: NodeId, vertical: bool, offset: f64, zoom: f64) -> Option<f64> {
     // The guide moves along the owner's own axis (x for a vertical guide, y for a horizontal one),
     // which the owner's transform may scale: convert the screen-pixel reach into owner units.
     let [a, b, c, d, _, _] = doc.world_transform(owner).as_coeffs();
     let axis = if vertical { a.hypot(b) } else { c.hypot(d) };
-    let threshold = SNAP_PX / (zoom.max(1e-6) * axis.max(1e-6));
+    let threshold = UNMEASURED_SNAP_PX / (zoom.max(1e-6) * axis.max(1e-6));
     Targets::gather_for_guide(doc, page, owner).snap_axis(vertical, offset, threshold).map(|d| offset + d).filter(|v| v.is_finite())
 }
 

@@ -14,6 +14,10 @@ pub enum EngineError {
     NoNode(NodeId),
     #[error("{0}")]
     Other(String),
+    /// A preview was asked for with no gesture open (something committed it under a held button).
+    /// Not for the user: the canvas drops it, as the drag it belonged to is over.
+    #[error("no gesture in progress")]
+    NoGesture,
     /// A command run in the background sent a request to a server and runs again with the answer
     /// ([`background`]); never returned to other callers.
     #[error("waiting for the server")]
@@ -35,7 +39,7 @@ impl From<figcraft_doc::DocError> for EngineError {
 impl EngineError {
     /// This error from a batch step, its message starting with `step`, the step's label
     /// ([`BatchScope::label`](crate::BatchScope::label)). The kind stays when it has a message. An
-    /// unknown command, a missing layer or no document has none, so it becomes [`Other`](Self::Other)
+    /// unknown command, a missing layer, no document or no gesture has none, so it becomes [`Other`](Self::Other)
     /// with the label in front, and the step is still named. `Waiting` stays as it is: the
     /// background runner reruns the batch on it.
     pub(crate) fn at_step(self, step: &str) -> Self {
@@ -44,7 +48,9 @@ impl EngineError {
             EngineError::Other(msg) => EngineError::Other(format!("{step}: {msg}")),
             EngineError::Disabled(cmd, why) => EngineError::Disabled(cmd, format!("{step}: {why}")),
             EngineError::Internal { cmd, msg } => EngineError::Internal { cmd, msg: format!("{step}: {msg}") },
-            e @ (EngineError::UnknownCommand(_) | EngineError::NoNode(_) | EngineError::NoDocument) => EngineError::Other(format!("{step}: {e}")),
+            e @ (EngineError::UnknownCommand(_) | EngineError::NoNode(_) | EngineError::NoDocument | EngineError::NoGesture) => {
+                EngineError::Other(format!("{step}: {e}"))
+            }
             e @ EngineError::Waiting => e,
         }
     }

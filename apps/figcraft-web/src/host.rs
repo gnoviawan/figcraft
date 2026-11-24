@@ -1,475 +1,143 @@
-//! The web host API: what a page embedding the editor in an `<iframe>` can ask of it. Methods use
-//! the control channel's names (`crates/ui-egui/src/control.rs`) plus host-only `host.*` ones;
-//! `params` and results travel as JSON text, so 64-bit node ids never pass through JavaScript
-//! numbers. The `postMessage` transport is in `bridge.rs`; this module is plain Rust.
+//! Host modes: a page that runs FigCraft (as an `<iframe>`, or in its own document) opens
+//! documents in it and stores what it saves instead of the browser downloading. The messages
+//! and the two transports are `craft-web-host`'s (storytold/craft-libs): the same contract as
+//! the other Craft apps' bridges. This module is FigCraft's part of it.
+//!
+//! - `?host=parent` (an `<iframe>`, such as a Nextcloud app) talks to the same-origin parent over
+//!   `postMessage`; `data-host="page"` on the canvas (the page's own document) uses DOM
+//!   `CustomEvent`s on the canvas instead. `?host=parent` wins when both are present.
+//! - `figcraft:ready` (to the host) once the app is running and listening; send a file now.
+//! - `figcraft:open` (from the host): `{ name, bytes }`. It opens exactly as a file picked with
+//!   File › Open or dropped on the window would (the app's own open queue, with its "Opening as
+//!   a new file" card). A payload over the browser's own open limit
+//!   ([`figcraft_ui_egui::browser_can_read`]'s 512 MB) is refused before its bytes are copied,
+//!   and anything malformed is ignored. FigCraft reads whole files, so it says `file: false` in
+//!   `ready` and a host sends `bytes`.
+//! - `figcraft:save` (to the host): `{ name, saveAs, bytes }` for every file the app hands its
+//!   download service; in host mode nothing reaches the browser's downloads. `saveAs` says whether
+//!   the file becomes the document's file ([`crate::hostmode::save_as`]):
+//!   - A Save of the file the host opened, under its own name: `false`.
+//!   - A document file (`.figcraft` or `.json`, the formats `file.save` and `file.saveAs` write)
+//!     under a name the host didn't open — Save As, or a Save of a document the host never sent
+//!     (an untitled one): `true`. It becomes the document's file; the next Save sends its name
+//!     with `false`. Names compare without case.
+//!   - Everything else is a copy or export that never becomes the document: `false` — rendered
+//!     images, SVG and PDF, `.fig` copies, and the variables exports (a `.variables.json`
+//!     sidecar's `.json` extension doesn't make it a document).
+//! - `figcraft:dirty` whenever unsaved changes appear or go away, `figcraft:failed` when the app
+//!   couldn't start.
+//!
+//! In host mode the app starts with no document (the home screen) and the host sends the file to
+//! edit; `?author=` names the user for comments and board notes.
 
-use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::cell::RefCell;
+use std::rc::Rc;
 
-use base64::Engine as _;
-use figcraft_doc::{Document, ExportFormat, NodeId};
-use figcraft_engine::{DocState, Session};
-use figcraft_ui_egui::guests::FlashKind;
-use figcraft_ui_egui::theme::{HostPalette, Tokens};
-use figcraft_ui_egui::{ControlReply, ControlRequest, FigApp, i18n};
-use serde_json::{Value, json};
+use craft_web_host::web::{FileData, Host, Message};
+use figcraft_ui_egui::FigApp;
 
-/// The typed error codes a host sees.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Code {
-    CanvasHidden,
-    UnknownMethod,
-    EngineError,
+/// The app id in the host messages (`figcraft:ready`).
+const APP: &str = "figcraft";
+
+/// The longest user name taken from `?author=`.
+const MAX_AUTHOR_CHARS: usize = 200;
+
+/// Files the host sent, on their way to the app's own open queue ([`figcraft_ui_egui::pending_open`]):
+/// `(name, bytes)`.
+pub type OpenQueue = Rc<RefCell<Vec<(String, Vec<u8>)>>>;
+
+#[derive(Clone)]
+pub struct Bridge {
+    host: Rc<Host>,
+    /// The file the host opened, and after a `saveAs` hand-over the document's file: the name a
+    /// Save under (`saveAs: false`) is decided against.
+    host_file: Rc<RefCell<Option<String>>>,
 }
 
-impl Code {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Code::CanvasHidden => "CANVAS_HIDDEN",
-            Code::UnknownMethod => "UNKNOWN_METHOD",
-            Code::EngineError => "ENGINE_ERROR",
+impl Bridge {
+    /// The bridge for this page, or `None` when FigCraft isn't hosted: no `?host=parent` and no
+    /// `data-host="page"` on the canvas, an unframed `?host=parent` page (it stays the normal app
+    /// with downloads), or a parent on another origin.
+    pub fn connect(canvas: &web_sys::HtmlCanvasElement) -> Option<Self> {
+        Some(Self { host: Rc::new(Host::connect(APP, canvas)?), host_file: Rc::default() })
+    }
+
+    /// Hear the files the host sends, and queue each one on `opens` for the app's own open path
+    /// (the shell drains it into [`figcraft_ui_egui::pending_open`] every frame, so a host file
+    /// opens like a dropped one).
+    pub fn listen(&self, opens: OpenQueue, ctx: egui::Context) {
+        let host_file = self.host_file.clone();
+        self.host.listen(move |message| {
+            if let Message::Open { name, data } = message {
+                deliver_open(&opens, &ctx, &host_file, &name, &data);
+            }
+        });
+    }
+
+    /// `?author=`: the host's name for the user signs comments and board notes.
+    pub fn set_author(app: &mut FigApp, author: &str) {
+        let author: String = author.trim().chars().take(MAX_AUTHOR_CHARS).collect();
+        if !author.is_empty() {
+            app.session.prefs.user_name = author;
         }
     }
-}
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct HostError {
-    pub code: Code,
-    pub message: String,
-}
-
-fn engine_error(message: impl Into<String>) -> HostError {
-    HostError { code: Code::EngineError, message: message.into() }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HostMethod {
-    OpenDocument,
-    Snapshot,
-    MarkSaved,
-    RenderPng,
-    ExportBytes,
-    Theme,
-    Locale,
-    Describe,
-    GuestCursor,
-    GuestFlash,
-    GuestHide,
-    File,
-}
-
-const HOST_METHODS: &[(&str, HostMethod)] = &[
-    ("host.openDocument", HostMethod::OpenDocument),
-    ("host.snapshot", HostMethod::Snapshot),
-    ("host.markSaved", HostMethod::MarkSaved),
-    ("host.renderPng", HostMethod::RenderPng),
-    ("host.exportBytes", HostMethod::ExportBytes),
-    ("host.theme", HostMethod::Theme),
-    ("host.locale", HostMethod::Locale),
-    ("host.describe", HostMethod::Describe),
-    ("host.guestCursor", HostMethod::GuestCursor),
-    ("host.guestFlash", HostMethod::GuestFlash),
-    ("host.guestHide", HostMethod::GuestHide),
-    ("host.file", HostMethod::File),
-];
-
-/// Most font files one `host.fallbackFonts` call fetches.
-const FALLBACK_FONTS_MAX: usize = 16;
-
-/// Control methods that act on the session alone: answered at once, outside any frame.
-const ENGINE_METHODS: &[&str] = &["engine.execute", "engine.commands", "document.inspect", "node.get"];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Route {
-    Engine,
-    Host(HostMethod),
-    /// `ui.*`: needs an egui pass, so it waits for the next frame.
-    Frame,
-    /// `host.fallbackFonts`: the transport fetches the files, then the reply follows.
-    Fonts,
-    /// `events.poll`: answered at once from the session's event log.
-    Events,
-    Unknown,
-}
-
-fn route(method: &str) -> Route {
-    if ENGINE_METHODS.contains(&method) {
-        return Route::Engine;
+    pub fn post_ready(&self) {
+        let _ = self.host.post_ready(env!("CARGO_PKG_VERSION"), false);
     }
-    if method == "host.fallbackFonts" {
-        return Route::Fonts;
+
+    /// The app couldn't start (no WebGPU or WebGL2, for example): let the host say so.
+    pub fn post_failed(&self, error: &str) {
+        let _ = self.host.post_failed(error, None);
     }
-    if method == "events.poll" {
-        return Route::Events;
+
+    /// The document file the host opened or the last Save As made, if any.
+    pub fn host_file(&self) -> Option<String> {
+        self.host_file.borrow().clone()
     }
-    if let Some((_, m)) = HOST_METHODS.iter().find(|(name, _)| *name == method) {
-        return Route::Host(*m);
-    }
-    if method.starts_with("ui.") {
-        return Route::Frame;
-    }
-    Route::Unknown
-}
 
-pub enum Answer {
-    /// The result as JSON text.
-    Now(Result<String, HostError>),
-    /// A `ui.*` method queued for the next frame; the frame's control drain replies here.
-    Later(Receiver<ControlReply>),
-    /// `host.fallbackFonts`: fetch these URLs, then reply with [`add_fallback_fonts`] of them.
-    FetchFonts(Vec<String>),
-}
-
-/// What `event.dirtyChanged` reports.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DirtyState {
-    pub dirty: bool,
-    pub content_version: u64,
-}
-
-impl DirtyState {
-    pub fn to_json(self) -> String {
-        json!({"dirty": self.dirty, "contentVersion": self.content_version}).to_string()
-    }
-}
-
-/// The document content last seen. Holding the `Arc` keeps copy-on-write honest: any later edit
-/// replaces the document rather than mutating this one in place, so pointer identity means
-/// "same content".
-struct Seen {
-    uid: u64,
-    doc: Arc<Document>,
-}
-
-/// Host-side state of one mounted editor.
-#[derive(Default)]
-pub struct Host {
-    seen: Option<Seen>,
-    content_version: u64,
-    /// The state last reported; `None` until the editor is ready (no dirty before ready).
-    reported: Option<DirtyState>,
-}
-
-impl Host {
-    /// Bumps `contentVersion` when the active document's content is no longer what was last seen.
-    /// A gesture in progress is not content yet: it counts once, when it is committed.
-    fn content_version(&mut self, session: &Session) -> u64 {
-        let Ok(ds) = session.ds() else { return self.content_version };
-        if ds.interaction.is_some() {
-            return self.content_version;
+    /// Hand a file the app would otherwise download to the host; `false` when nothing was
+    /// delivered. The `saveAs` rule is this module's documentation's.
+    pub fn post_save(&self, path: &str, bytes: &[u8]) -> bool {
+        let name = file_name(path);
+        let host_file = self.host_file.borrow().clone();
+        let save_as = crate::hostmode::save_as(&name, host_file.as_deref());
+        let sent = self.host.post_save(&name, bytes, None, save_as).is_ok();
+        // After a Save As hand-over the host has the new file: the next Save of it sends its name
+        // with `saveAs: false`. A failed send changes nothing, so a retry is still a Save As.
+        if sent && save_as {
+            *self.host_file.borrow_mut() = Some(name);
         }
-        let doc = ds.document_itself();
-        if !self.seen.as_ref().is_some_and(|s| s.uid == ds.uid && Arc::ptr_eq(&s.doc, doc)) {
-            self.content_version += 1;
-            self.seen = Some(Seen { uid: ds.uid, doc: doc.clone() });
-        }
-        self.content_version
+        sent
     }
 
-    pub fn state(&mut self, session: &Session) -> DirtyState {
-        let content_version = self.content_version(session);
-        DirtyState { dirty: session.ds().is_ok_and(DocState::is_dirty), content_version }
-    }
-
-    /// The editor drew its first frame: from now on, changes are reported.
-    pub fn mark_ready(&mut self, session: &Session) {
-        self.reported = Some(self.state(session));
-    }
-
-    /// The state to report when it differs from the last one reported (after ready only).
-    pub fn changed(&mut self, session: &Session) -> Option<DirtyState> {
-        self.reported?;
-        let now = self.state(session);
-        (self.reported != Some(now)).then(|| {
-            self.reported = Some(now);
-            now
-        })
-    }
-
-    /// Answer `method` with `params` (JSON text). `hidden`: no frames are drawn now (the page is
-    /// hidden or the canvas is off screen).
-    pub fn call(&mut self, app: &mut FigApp, ctx: &egui::Context, method: &str, params: &str, hidden: bool) -> Answer {
-        let unknown = || Answer::Now(Err(HostError { code: Code::UnknownMethod, message: format!("unknown method `{method}`") }));
-        let route = route(method);
-        if route == Route::Unknown {
-            return unknown();
-        }
-        let p: Value = if params.trim().is_empty() {
-            json!({})
-        } else {
-            match serde_json::from_str(params) {
-                Ok(p) => p,
-                Err(e) => return Answer::Now(Err(engine_error(format!("params are not JSON: {e}")))),
-            }
-        };
-        if app.shell.rejects(method, &p) {
-            return unknown();
-        }
-        let result = match route {
-            Route::Frame if hidden => {
-                return Answer::Now(Err(HostError {
-                    code: Code::CanvasHidden,
-                    message: format!("`{method}` needs a frame and the canvas is hidden"),
-                }));
-            }
-            Route::Frame => {
-                let (reply, rx) = std::sync::mpsc::channel();
-                app.control_queue.push(ControlRequest { id: Value::Null, method: method.to_string(), params: p, reply, state: Default::default() });
-                ctx.request_repaint();
-                return Answer::Later(rx);
-            }
-            Route::Fonts => return font_urls(&p).map_or_else(|e| Answer::Now(Err(e)), Answer::FetchFonts),
-            Route::Engine => figcraft_ui_egui::control::handle(app, ctx, method, &p).map_err(engine_error),
-            Route::Events => events_poll(&app.session, &p),
-            Route::Host(m) => self.host(app, ctx, m, &p),
-            Route::Unknown => return unknown(),
-        };
-        ctx.request_repaint();
-        Answer::Now(result.and_then(|v| serde_json::to_string(&v).map_err(|e| engine_error(e.to_string()))))
-    }
-
-    fn host(&mut self, app: &mut FigApp, ctx: &egui::Context, m: HostMethod, p: &Value) -> Result<Value, HostError> {
-        let b64 = base64::engine::general_purpose::STANDARD;
-        match m {
-            HostMethod::OpenDocument => {
-                let text = p.get("bytes").and_then(Value::as_str).ok_or_else(|| engine_error("`bytes` (base64) required"))?;
-                let bytes = b64.decode(text).map_err(|e| engine_error(format!("`bytes` is not base64: {e}")))?;
-                let loaded = figcraft_format::load_bytes_with_versions(&bytes).map_err(|e| engine_error(e.to_string()))?;
-                // One document per mount: the opened file replaces whatever was open.
-                let ds = DocState::new(loaded.doc, None).with_versions(loaded.versions).with_branches(loaded.branches);
-                app.session.docs = vec![ds];
-                app.session.active = 0;
-                app.ui.home = false;
-                app.ui.host_location = None;
-                Ok(json!({"contentVersion": self.content_version(&app.session)}))
-            }
-            HostMethod::Snapshot => {
-                let content_version = self.content_version(&app.session);
-                let bytes = on_the_document_itself(&mut app.session, |s| {
-                    let ds = s.ds().map_err(|e| engine_error(e.to_string()))?;
-                    figcraft_engine::cmd::file::file_bytes(ds).map_err(|e| engine_error(e.to_string()))
-                })?;
-                Ok(json!({"contentVersion": content_version, "bytes": b64.encode(bytes)}))
-            }
-            HostMethod::MarkSaved => {
-                let saved = p.get("contentVersion").and_then(Value::as_u64).ok_or_else(|| engine_error("`contentVersion` required"))?;
-                // A snapshot older than the content now must not clear dirty.
-                if saved == self.content_version(&app.session) {
-                    on_the_document_itself(&mut app.session, |s| s.ds_mut().map(DocState::mark_saved).map_err(|e| engine_error(e.to_string())))?;
-                }
-                let s = self.state(&app.session);
-                Ok(json!({"dirty": s.dirty, "contentVersion": s.content_version}))
-            }
-            HostMethod::RenderPng => export(&app.session, ExportFormat::Png, p).map(|bytes| json!(b64.encode(bytes))),
-            HostMethod::ExportBytes => {
-                let name = p.get("format").and_then(Value::as_str).ok_or_else(|| engine_error("`format` required: png|jpg|svg|pdf|webp"))?;
-                let format = ExportFormat::from_ext(&name.to_ascii_lowercase()).ok_or_else(|| engine_error(format!("unknown format `{name}`")))?;
-                export(&app.session, format, p).map(|bytes| json!(b64.encode(bytes)))
-            }
-            HostMethod::Theme => {
-                let tokens = palette(p.get("tokens").ok_or_else(|| engine_error("`tokens` required (null clears them)"))?)?;
-                app.ui.host_theme = tokens.as_ref().map(Tokens::from_host);
-                app.apply_theme(ctx);
-                Ok(json!({"dark": app.ui.dark}))
-            }
-            HostMethod::Locale => {
-                let tag = p.get("bcp47").and_then(Value::as_str).ok_or_else(|| engine_error("`bcp47` required"))?;
-                app.session.execute("pref.language", &json!({"language": tag})).map_err(|e| engine_error(e.to_string()))?;
-                // At once, not at the next frame: a hidden mount draws none.
-                i18n::set(&app.session.prefs.language, app.services.system_language().as_deref());
-                Ok(json!({"language": i18n::current().map_or("en", |l| l.code)}))
-            }
-            HostMethod::Describe => Ok(json!({"tag": option_env!("FIGCRAFT_HOST_TAG").unwrap_or("dev"), "engineVersion": env!("CARGO_PKG_VERSION")})),
-            HostMethod::GuestCursor => {
-                let (id, name) = (text(p, "id")?, text(p, "name")?);
-                let color = text(p, "color")?;
-                let color = hex(color).ok_or_else(|| engine_error(format!("`color` is not #rrggbb: `{color}`")))?;
-                let at = (number(p, "x")?, number(p, "y")?);
-                let page = match p.get("page") {
-                    None | Some(Value::Null) => None,
-                    Some(v) => Some(figcraft_engine::params::id_of(v).ok_or_else(|| engine_error("`page` is not a node id"))?),
-                };
-                let guests = &mut app.ui.guests;
-                guests.cursor(guests.now(), id, name, color, at, page);
-                Ok(json!({}))
-            }
-            HostMethod::GuestFlash => {
-                let id = text(p, "id")?;
-                let ids = p.get("ids").and_then(Value::as_array).ok_or_else(|| engine_error("`ids` (node ids) required"))?;
-                let nodes = ids
-                    .iter()
-                    .map(figcraft_engine::params::id_of)
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| engine_error("`ids` holds something that is not a node id"))?;
-                let kind = p
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .and_then(FlashKind::parse)
-                    .ok_or_else(|| engine_error("`kind` must be \"write\" or \"read\""))?;
-                let guests = &mut app.ui.guests;
-                guests.flash(guests.now(), id, &nodes, kind);
-                Ok(json!({}))
-            }
-            HostMethod::GuestHide => {
-                let id = text(p, "id")?;
-                let guests = &mut app.ui.guests;
-                guests.hide(guests.now(), id);
-                Ok(json!({}))
-            }
-            HostMethod::File => {
-                let name = text(p, "name")?.to_string();
-                if name.is_empty() {
-                    return Err(engine_error("`name` must not be empty"));
-                }
-                let (path, location) = (optional_text(p, "path")?, optional_text(p, "location")?);
-                let content_version = self.content_version(&app.session);
-                on_the_document_itself(&mut app.session, |s| {
-                    let ds = s.ds_mut().map_err(|e| engine_error(e.to_string()))?;
-                    ds.path = path;
-                    if ds.doc.name != name {
-                        let clean = !ds.is_dirty();
-                        ds.doc_mut().name = name;
-                        if clean {
-                            ds.mark_saved();
-                        }
-                    }
-                    Ok(())
-                })?;
-                // The host's file name is not an edit: the renamed document keeps the version.
-                self.seen = app.session.ds().ok().map(|ds| Seen { uid: ds.uid, doc: ds.document_itself().clone() });
-                app.ui.host_location = location;
-                Ok(json!({"contentVersion": content_version}))
-            }
-        }
+    /// Report unsaved changes when they appear or go away, not every frame (the crate does not
+    /// repeat a state it already reported).
+    pub fn set_dirty(&self, dirty: bool) {
+        self.host.post_dirty(dirty);
     }
 }
 
-/// `events.poll {after?, topics?, limit?}` as the control channel answers it, without waiting:
-/// `timeoutMs` is ignored, because the page's one thread draws the editor and runs its commands, so
-/// nothing could add an event while it waited. A host that wants a long poll asks again.
-fn events_poll(session: &Session, p: &Value) -> Result<Value, HostError> {
-    let after = p.get("after").and_then(Value::as_u64).unwrap_or(0);
-    let limit = p.get("limit").and_then(Value::as_u64).unwrap_or(100).clamp(1, 1000) as usize;
-    let topics = figcraft_engine::events::topics(p.get("topics")).map_err(engine_error)?;
-    let result = session.events.poll(after, &topics, limit, std::time::Duration::ZERO);
-    serde_json::to_value(result).map_err(|e| engine_error(e.to_string()))
-}
-
-fn optional_text(p: &Value, key: &str) -> Result<Option<String>, HostError> {
-    match p.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(engine_error(format!("`{key}` must be text or null"))),
-    }
-}
-
-/// `host.fallbackFonts`' `urls`: font files to fetch, resolved against the editor's page.
-fn font_urls(p: &Value) -> Result<Vec<String>, HostError> {
-    let urls = p.get("urls").and_then(Value::as_array).ok_or_else(|| engine_error("`urls` (font file URLs) required"))?;
-    if urls.len() > FALLBACK_FONTS_MAX {
-        return Err(engine_error(format!("at most {FALLBACK_FONTS_MAX} `urls`")));
-    }
-    urls.iter()
-        .map(|u| u.as_str().filter(|u| !u.is_empty()).map(str::to_owned))
-        .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| engine_error("`urls` holds something that is not a URL"))
-}
-
-/// `host.fallbackFonts`' result once its files are fetched (each URL with its bytes or why it
-/// has none): every face they hold becomes a fallback for characters a text's own font lacks.
-/// A file that fails is listed, not fatal, so one missing font costs only its characters.
-pub fn add_fallback_fonts(files: Vec<(String, Result<Vec<u8>, String>)>) -> String {
-    let mut families: Vec<String> = Vec::new();
-    let mut failed = Vec::new();
-    for (url, bytes) in files {
-        match bytes.map(figcraft_text::add_fallback_font) {
-            Ok(added) if !added.is_empty() => {
-                for family in added {
-                    if !families.contains(&family) {
-                        families.push(family);
-                    }
-                }
-            }
-            Ok(_) => failed.push(json!({"url": url, "error": "not a font file"})),
-            Err(error) => failed.push(json!({"url": url, "error": error})),
-        }
-    }
-    json!({"families": families, "failed": failed}).to_string()
-}
-
-fn text<'a>(p: &'a Value, key: &str) -> Result<&'a str, HostError> {
-    p.get(key).and_then(Value::as_str).ok_or_else(|| engine_error(format!("`{key}` (text) required")))
-}
-
-fn number(p: &Value, key: &str) -> Result<f64, HostError> {
-    p.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| engine_error(format!("`{key}` (number) required")))
-}
-
-/// Runs `f` with the document itself in `ds.doc`, not the version or live text preview shown in
-/// its place (saving encodes and marks saved `ds.doc`). A version preview is shown again after.
-fn on_the_document_itself<R>(session: &mut Session, f: impl FnOnce(&mut Session) -> R) -> R {
-    figcraft_engine::textpreview::end(session);
-    let preview = session.ds_mut().ok().and_then(|ds| {
-        let shown = ds.preview.clone().map(|p| (p, ds.doc.clone()));
-        ds.end_preview();
-        shown
-    });
-    let result = f(session);
-    if let (Some((p, shown)), Ok(ds)) = (preview, session.ds_mut()) {
-        ds.start_preview(&p.id, &p.name, p.time, shown);
-    }
-    result
-}
-
-/// The host's colour roles in `host.theme`'s `tokens`, each `#rrggbb`, with `mode` `light` or
-/// `dark`. `null` hands the colours back to the editor's theme preference.
-fn palette(tokens: &Value) -> Result<Option<HostPalette>, HostError> {
-    if tokens.is_null() {
-        return Ok(None);
-    }
-    let dark = match tokens.get("mode").and_then(Value::as_str) {
-        Some("dark") => true,
-        Some("light") => false,
-        _ => return Err(engine_error("`tokens.mode` must be \"light\" or \"dark\"")),
+/// The file an open message carries, queued for the app's own open path, or nothing when the
+/// payload isn't one (a `File` the app doesn't read, or over the open limit).
+fn deliver_open(opens: &OpenQueue, ctx: &egui::Context, host_file: &RefCell<Option<String>>, name: &str, data: &FileData) {
+    let name = crate::hostmode::open_name(name);
+    let FileData::Bytes(array) = data else {
+        log::warn!("host file {name} came as a File; FigCraft reads bytes only; not opened");
+        return;
     };
-    let color = |key: &str| {
-        let text = tokens.get(key).and_then(Value::as_str).ok_or_else(|| engine_error(format!("`tokens.{key}` (#rrggbb) required")))?;
-        hex(text).ok_or_else(|| engine_error(format!("`tokens.{key}` is not #rrggbb: `{text}`")))
-    };
-    Ok(Some(HostPalette {
-        dark,
-        background: color("background")?,
-        card: color("card")?,
-        foreground: color("foreground")?,
-        muted_foreground: color("mutedForeground")?,
-        border: color("border")?,
-        primary: color("primary")?,
-        primary_fill: color("primaryFill")?,
-        destructive: color("destructive")?,
-    }))
+    if figcraft_ui_egui::browser_can_read(&name, data.size()).is_err() {
+        log::warn!("host file {name} is too large to open in the browser; not opened");
+        return;
+    }
+    // The document's file is now the one the host sent: a Save of it under this name is
+    // `saveAs: false`.
+    *host_file.borrow_mut() = Some(name.clone());
+    opens.borrow_mut().push((name, array.to_vec()));
+    ctx.request_repaint();
 }
 
-fn hex(text: &str) -> Option<egui::Color32> {
-    let digits = text.strip_prefix('#').filter(|d| d.len() == 6 && d.bytes().all(|b| b.is_ascii_hexdigit()))?;
-    let byte = |i: usize| digits.get(i..i + 2).and_then(|h| u8::from_str_radix(h, 16).ok());
-    Some(egui::Color32::from_rgb(byte(0)?, byte(2)?, byte(4)?))
-}
-
-/// `ids` (default: the current page's top-level layers) exported as `format` at `scale`.
-fn export(session: &Session, format: ExportFormat, p: &Value) -> Result<Vec<u8>, HostError> {
-    let scale = p.get("scale").and_then(Value::as_f64).filter(|s| s.is_finite() && *s > 0.0).map_or(1.0, |s| s.min(64.0));
-    let doc = session.doc().map_err(|e| engine_error(e.to_string()))?;
-    let mut ids: Vec<NodeId> =
-        p.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(figcraft_engine::params::id_of).collect()).unwrap_or_default();
-    if ids.is_empty() {
-        let page = session.page().map_err(|e| engine_error(e.to_string()))?;
-        ids = doc.node(page).map(|n| n.children.clone()).unwrap_or_default();
-    }
-    if ids.is_empty() {
-        return Err(engine_error("the current page is empty: nothing to export"));
-    }
-    if let Some(missing) = ids.iter().find(|i| !doc.contains(**i)) {
-        return Err(engine_error(format!("no such node {missing}")));
-    }
-    figcraft_engine::cmd::file::export_bytes(doc, &ids, format, scale).map_err(|e| engine_error(e.to_string()))
+/// The last component of `path`, or the whole of it when there is none.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string())
 }
