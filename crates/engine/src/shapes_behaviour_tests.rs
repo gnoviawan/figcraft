@@ -618,7 +618,9 @@ fn node_set_non_numeric_miter_smoothing_paragraph_is_an_error() {
     ex(&mut s, "node.set", json!({"ids": [t], "props": {"paragraphSpacing": 6, "paragraphIndent": 4}}));
     for (id, key) in [(r, "miterLimit"), (r, "cornerSmoothing"), (t, "paragraphSpacing"), (t, "paragraphIndent")] {
         let err = s.execute("node.set", &json!({"ids": [id], "props": {key: "abc"}})).expect_err(key);
-        assert!(err.to_string().contains("must be a number"), "{key}: {err}");
+        // cornerSmoothing has a range, so its refusal names the range rather than "a number".
+        let want = if key == "cornerSmoothing" { "must be between 0 and 1" } else { "must be a number" };
+        assert!(err.to_string().contains(want), "{key}: {err}");
     }
     assert_eq!(node(&s, r).stroke.miter_limit, 8.0);
     assert_eq!(node(&s, r).corners.smoothing, 0.5);
