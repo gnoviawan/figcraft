@@ -1,10 +1,10 @@
-# Termul's fork release: builds only the web bundle with the Termul brand and publishes
+# Troupe's fork release: builds only the web bundle with the Troupe brand and publishes
 # figcraft-web-<tag>.zip plus SHA256SUMS.txt to the GitHub release of a `termul-*` tag.
 # Upstream's release.yml (storytold/craft-common-actions) is not used here.
 #
 # Run it by hand (workflow_dispatch) for a dry build: it builds, checks the zip and uploads it as a
 # workflow artifact, and never touches releases.
-name: Termul release
+name: Troupe release
 
 on:
   push:
@@ -29,7 +29,7 @@ env:
   TRUNK_VERSION: "0.21.14"
   WASM_BINDGEN_VERSION: "0.2.129"
   BINARYEN_VERSION: "123"
-  FIGCRAFT_BRAND_NAME: "Termul Canvas"
+  FIGCRAFT_BRAND_NAME: "Troupe Canvas"
   # Same pin as release.yml and ci.yml. It must be a commit with fonts/latin-manifest.txt (Inter):
   # the wasm build embeds nothing without Inter and text then has no width.
   CRAFT_FONTS_REF: "37827adc41fd165f9a9234ac40f94dbad353aa69"
@@ -115,7 +115,7 @@ jobs:
         env:
           DIST: ${{ runner.temp }}/release
           # package.sh keeps a .wasm under 24 MiB for Cloudflare's 25 MiB per-file cap. This bundle
-          # never goes to Cloudflare: Termul downloads it from this repository's GitHub release,
+          # never goes to Cloudflare: Troupe downloads it from this repository's GitHub release,
           # embeds it in its own binary and serves it from its own server (termul
           # src-tauri/build.rs, src-tauri/src/canvas/static_server.rs). 24.5 MiB keeps the gate as a
           # check on growth, below that cap.
@@ -194,6 +194,6 @@ jobs:
           set -euo pipefail
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --title "$TAG" \
-              --notes "Termul Canvas web bundle built from $GITHUB_SHA."
+              --notes "Troupe Canvas web bundle built from $GITHUB_SHA."
           fi
           gh release upload "$TAG" "release/figcraft-web-$TAG.zip" release/SHA256SUMS.txt --clobber
