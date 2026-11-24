@@ -727,7 +727,7 @@ fn a_refused_step_names_its_step_and_keeps_its_kind() {
     match result {
         Err(EngineError::Disabled(cmd, msg)) => {
             assert_eq!(cmd, "node.create");
-            assert!(msg.starts_with("step 0: "), "{msg}");
+            assert!(msg.starts_with("step 0 (node.create): "), "{msg}");
             assert!(msg.contains("can't be added"), "{msg}");
         }
         other => panic!("expected Disabled, got {other:?}"),
@@ -758,7 +758,7 @@ fn an_internal_step_says_which_step_without_changing_kind() {
     match result {
         Err(EngineError::Internal { cmd, msg }) => {
             assert_eq!(cmd, "node.set");
-            assert!(msg.starts_with("step 0: "), "{msg}");
+            assert!(msg.starts_with("step 0 (node.set): "), "{msg}");
         }
         other => panic!("expected Internal, got {other:?}"),
     }
