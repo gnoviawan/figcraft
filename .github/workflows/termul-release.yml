@@ -43,12 +43,12 @@ jobs:
     env:
       CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out craft-fonts at the pinned commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           repository: storytold/craft-fonts
           ref: ${{ env.CRAFT_FONTS_REF }}
@@ -70,12 +70,12 @@ jobs:
       # its code needs more than its declared rust-version 1.95 (`usize::isolate_lowest_one` in
       # crates/pathops/src/budget.rs). Pin a stable release so a build is reproducible; move it when
       # an upstream sync needs a newer one.
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+      - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: "1.98.1"
           targets: wasm32-unknown-unknown
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: termul-web
           cache-on-failure: true
@@ -162,7 +162,7 @@ jobs:
           sha256sum "figcraft-web-$TAG.zip" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: termul-web-release
           path: |
@@ -184,7 +184,7 @@ jobs:
       GH_REPO: ${{ github.repository }}
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: termul-web-release
           path: release
