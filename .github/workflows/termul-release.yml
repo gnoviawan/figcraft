@@ -146,9 +146,8 @@ jobs:
             || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not the <title> of index.html"; exit 1; }
           unzip -p "$zip" "$root/index.html" | grep -F "Loading $FIGCRAFT_BRAND_NAME&hellip;" >/dev/null \
             || { echo "::error::brand '$FIGCRAFT_BRAND_NAME' is not in the loading text of index.html"; exit 1; }
-          # Inter's name table is UTF-16BE, so this only matches font bytes, not a "Inter" string literal.
-          unzip -p "$zip" "$wasm" | LC_ALL=C grep -aP '\x00I\x00n\x00t\x00e\x00r\x00 \x00P\x00r\x00o\x00j\x00e\x00c\x00t' >/dev/null \
-            || { echo "::error::craft-fonts (Inter) is not embedded in the wasm; text would have no width"; exit 1; }
+          # Inter itself is not grepped: web builds embed fonts zlib-packed, and CRAFT_FONTS_REQUIRED
+          # makes crates/text/build.rs fail the build when Inter Regular or SemiBold is missing.
           grep -qx "$root/OFL-inter.txt" <<<"$entries" \
             || { echo "::error::$root/OFL-inter.txt missing; the OFL requires the licence to travel with the font"; exit 1; }
           echo "$entries"
